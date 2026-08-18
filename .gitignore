@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Local secrets and configuration
+.env
+
+# Local data: uploaded documents live here and must never be committed
+data/
+# Documents written by the browser end-to-end tests
+e2e-data/
+
+# Playwright output
+playwright-report/
+test-results/
+.playwright/
+
+# Node / frontend (from Phase 3 onwards)
+node_modules/
+dist/
+
+# Editors / OS
+.idea/
+.vscode/
+Thumbs.db
+
+# Local AI tooling
+.claude/
+
+# TypeScript build cache
+*.tsbuildinfo

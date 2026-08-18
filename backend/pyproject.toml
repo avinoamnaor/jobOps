@@ -1,0 +1,54 @@
+[project]
+name = "jobops-backend"
+version = "0.1.0"
+description = "JobOps — personal job-application tracker"
+requires-python = ">=3.11"
+
+dependencies = [
+    "fastapi>=0.115",
+    # Required by FastAPI to parse multipart/form-data, i.e. file uploads.
+    "python-multipart>=0.0.9",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "ruff>=0.5",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# B008 normally flags a function call in an argument default (a real footgun
+# with mutable defaults). FastAPI's dependency injection is deliberately built
+# on that exact pattern (`db: Session = Depends(get_db)`), so this tells ruff
+# it's an intentional, safe call rather than a bug to fix.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Body",
+]

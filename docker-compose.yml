@@ -1,0 +1,51 @@
+# Local development only.
+#
+# Scope decision (Phase 0): Docker runs PostgreSQL and nothing else. FastAPI and
+# React run natively on the host so the edit-reload loop stays fast and the
+# debugger just works.
+#
+# The credentials below are local-development values, not secrets. Real
+# deployment credentials would come from the environment, never from this file.
+
+services:
+  db:
+    image: postgres:16
+    container_name: jobops-postgres
+    restart: unless-stopped
+
+    # These three variables are read by the postgres image's entrypoint the very
+    # first time the data directory is created. They must match DATABASE_URL in .env.
+    environment:
+      POSTGRES_USER: jobops
+      POSTGRES_PASSWORD: jobops
+      POSTGRES_DB: jobops
+
+    ports:
+      # "<host port>:<container port>". Postgres always listens on 5432 inside
+      # the container; the left number is what your laptop sees. If something
+      # else already owns 5432, change the left side to 5433 and update
+      # DATABASE_URL in .env to match.
+      - "5432:5432"
+
+    volumes:
+      # Named volume: the actual database files live here, managed by Docker and
+      # completely independent of the container's lifetime. `docker compose down`
+      # destroys the container but NOT this volume, so your data survives.
+      # (`docker compose down -v` does delete it — that is the dangerous one.)
+      - jobops_pgdata:/var/lib/postgresql/data
+
+      # Bind mount: scripts here are executed exactly once, when the data
+      # directory is first initialised. If you ever need to re-run them you must
+      # delete the volume first.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      # Lets `docker compose ps` tell you when Postgres is actually accepting
+      # connections, rather than merely "running".
+      test: ["CMD-SHELL", "pg_isready -U jobops -d jobops"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  jobops_pgdata:
