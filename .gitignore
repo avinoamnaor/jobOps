@@ -13,6 +13,8 @@ __pycache__/
 data/
 # Documents written by the browser end-to-end tests
 e2e-data/
+# Fictional documents written by the demo seed script
+demo-data/
 
 # Playwright output
 playwright-report/

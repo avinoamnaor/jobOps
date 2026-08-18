@@ -1,4 +1,13 @@
+import { platform } from 'node:os'
 import { defineConfig, devices } from '@playwright/test'
+
+// The Playwright webServer command runs through the OS shell, so the path to the
+// virtualenv Python must use the platform's own layout and separators. On
+// Windows that is `.venv\Scripts\python.exe`; elsewhere `.venv/bin/python`.
+// (A forward-slash path fails on Windows, where cmd.exe reads the leading
+// segment as a switch.)
+const VENV_PYTHON =
+  platform() === 'win32' ? '.venv\\Scripts\\python.exe' : '.venv/bin/python'
 
 /**
  * Browser end-to-end tests.
@@ -40,7 +49,7 @@ export default defineConfig({
       // Environment variables win over the .env file in pydantic-settings, so
       // this instance uses the E2E database and its own document directory
       // without any change to the committed configuration.
-      command: '.venv/Scripts/python.exe -m uvicorn app.main:app --port 8001 --log-level warning',
+      command: `${VENV_PYTHON} -m uvicorn app.main:app --port 8001 --log-level warning`,
       cwd: '../backend',
       url: `http://localhost:${E2E_API_PORT}/health`,
       reuseExistingServer: false,

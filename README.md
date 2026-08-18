@@ -1,128 +1,208 @@
 # JobOps
 
-A personal job-application tracker: one place for every application, the exact CV
-submitted, and the full history of what happened.
+JobOps is a local, single-user job-application tracker. It keeps every application
+in one place along with its full status history and the exact CV submitted for it,
+so nothing gets lost across inboxes, spreadsheets, and scattered CV files. It is a
+personal full-stack project built with a React/TypeScript frontend and a
+Python/FastAPI backend over PostgreSQL.
 
-Local, single-user, no authentication. Runs on your laptop.
+## Screenshots
 
-## Stack
+The data shown below is fictional, generated only for these screenshots.
 
-| Part | Choice |
-|---|---|
-| Backend | Python 3.11 + FastAPI + SQLAlchemy 2.0 |
-| Database | PostgreSQL 16 (in Docker) |
-| Migrations | Alembic |
-| Frontend | React 18 + TypeScript + Vite |
-| Files | Content-addressed local storage under `data/documents/` |
+**Applications overview**
 
-## Running it
+![Applications overview](screenshots/applications.png)
 
-Three things need to be running: PostgreSQL, the API, and the UI.
+**Application details & timeline**
 
-### 1. PostgreSQL
+![Application details and timeline](screenshots/application-detail.png)
+
+**Document library**
+
+![Document library](screenshots/documents.png)
+
+## Features
+
+- Create and manage job applications (company, role, channel, location, work mode, job URL, description, notes)
+- Track the current application status through a defined set of stages
+- A timeline that records every event: status changes, notes, scheduled interviews, and document attachments
+- Track the exact CV submitted for each application
+- A document library for CVs, cover letters, and other files
+- Search by company or role, and filter by status and channel
+- Paginated application list
+- Content-hash (SHA-256) file storage, so identical uploads are automatically deduplicated
+- Interactive API documentation (Swagger UI) served by FastAPI
+
+## Tech Stack
+
+**Frontend**
+- React
+- TypeScript
+- Vite
+
+**Backend**
+- Python
+- FastAPI
+- SQLAlchemy
+
+**Data / Infrastructure**
+- PostgreSQL
+- Alembic
+- Docker
+
+**Testing**
+- Pytest (backend unit and API tests)
+- Vitest (frontend unit tests)
+- Playwright (browser end-to-end tests)
+- ESLint + Ruff (linting)
+
+## Engineering / Design Highlights
+
+**Event-sourced status history.** `applications.status` is a cached projection of
+an append-only event log, not an independent field. A single service-layer
+function is the only code that may change status, and it always writes a matching
+`status_changed` event in the same database transaction. Because of this, the
+generic `PATCH` endpoint rejects a `status` field and a dedicated
+`POST /applications/{id}/status` endpoint exists instead — status can never change
+without the timeline explaining how and when.
+
+**Content-addressed document storage.** Files are stored under the SHA-256 hash of
+their own contents rather than under their uploaded filename. This deduplicates
+identical uploads for free, makes stored documents effectively immutable (a
+different file is a different hash), and means an untrusted filename is never used
+to build a filesystem path.
+
+**Schema migrations.** The PostgreSQL schema is managed with Alembic migrations
+rather than auto-created from the models, so schema changes are explicit,
+reviewable, and reproducible on a fresh database.
+
+**Layered backend.** HTTP routers stay thin; all business rules live in a service
+layer, with SQLAlchemy models and Pydantic schemas kept separate. This keeps the
+invariants above enforceable in one place.
+
+**Tests against a real database.** The backend test suite runs against a real
+PostgreSQL database built from the actual migrations, with a safety guard that
+refuses to run unless the target database has the expected test name — so a
+misconfigured environment can never touch development data.
+
+## Running Locally
+
+### Prerequisites
+
+- Python 3.11+
+- Node.js 18+
+- Docker (for PostgreSQL)
+
+### 1. Clone
+
+```bash
+git clone <your-repo-url> jobops
+cd jobops
+```
+
+### 2. Configure environment
+
+```bash
+cp .env.example .env
+```
+
+The defaults in `.env.example` match the Docker database below, so no edits are
+needed for a standard local setup. The frontend also has a `frontend/.env.example`
+with a sensible default API URL.
+
+### 3. Start PostgreSQL
 
 ```bash
 docker compose up -d
 ```
 
 Data lives in a named Docker volume, so `docker compose down` keeps it.
-`docker compose down -v` deletes it — that is the destructive one.
+(`docker compose down -v` deletes the volume — that is the destructive one.)
 
-### 2. Backend API
-
-```bash
-cd backend && .venv/Scripts/activate && uvicorn app.main:app --reload --port 8000
-```
-
-On first run, or after pulling new migrations:
+### 4. Backend
 
 ```bash
-cd backend && .venv/Scripts/activate && alembic upgrade head
+cd backend
+python -m venv .venv
+# Windows:       .venv\Scripts\activate
+# macOS / Linux: source .venv/bin/activate
+pip install -e ".[dev]"
+alembic upgrade head
+uvicorn app.main:app --reload --port 8000
 ```
 
-- API: <http://localhost:8000>
-- Interactive API docs: <http://localhost:8000/docs>
-- Health: <http://localhost:8000/health> and `/health/db`
+- API: http://localhost:8000
+- Interactive API docs: http://localhost:8000/docs
 
-### 3. Frontend
+### 5. Frontend
+
+In a second terminal:
 
 ```bash
-cd frontend && npm run dev
+cd frontend
+npm install
+npm run dev
 ```
 
-Open <http://localhost:5173>.
+Open http://localhost:5173.
 
-The port matters: the backend's `CORS_ORIGINS` allows `http://localhost:5173`,
-so the browser will block requests from any other port.
+The port matters: the backend's `CORS_ORIGINS` allows `http://localhost:5173`, so
+requests from another port are blocked by the browser.
 
-## Configuration
+## Testing
 
-| File | Purpose |
-|---|---|
-| `.env` (repo root) | Backend: `DATABASE_URL`, `TEST_DATABASE_URL`, `DOCUMENTS_ROOT`, `CORS_ORIGINS` |
-| `frontend/.env` | Frontend: `VITE_API_BASE_URL` |
-
-Both have a committed `.env.example`. The real `.env` files are gitignored.
-
-## Tests
+Backend (requires the Docker database to be running):
 
 ```bash
-cd backend && .venv/Scripts/python.exe -m pytest
+cd backend
+pytest
 ```
+
+Frontend unit tests, linting, and production build:
 
 ```bash
-cd frontend && npm run test && npm run lint && npm run build
+cd frontend
+npm run test
+npm run lint
+npm run build
 ```
 
-Backend tests run against a real `jobops_test` PostgreSQL database, built by
-running the actual Alembic migrations. A guard in `tests/conftest.py` refuses to
-run if that database is not named exactly `jobops_test`, so a misconfigured
-`.env` can never wipe your development data.
+Browser end-to-end tests (Playwright):
 
-## Project layout
+```bash
+cd frontend
+npm run test:e2e
+```
+
+## Project Structure
 
 ```
 jobops/
 ├── docker-compose.yml       PostgreSQL only; the app runs natively
-├── docker/initdb/           creates jobops_test on first volume init
-├── data/documents/          uploaded files (gitignored)
 ├── backend/
-│   ├── alembic/versions/    migrations
+│   ├── alembic/versions/    database migrations
 │   └── app/
 │       ├── api/             HTTP routers — no business logic
-│       ├── services/        business rules live here
+│       ├── services/        business rules and invariants
 │       ├── models/          SQLAlchemy tables
 │       ├── schemas/         Pydantic request/response shapes
-│       ├── core/            storage, normalisation, errors
-│       ├── config.py db.py enums.py main.py
+│       └── core/            storage, normalisation, errors
 └── frontend/
     └── src/
-        ├── api/             the only place fetch() is called
+        ├── api/             typed API client (the only place fetch() is called)
+        ├── pages/           one component per route
         ├── components/      shared UI pieces
-        ├── pages/           one per route
-        ├── hooks/           useAsync, useDebounced
+        ├── hooks/           small reusable hooks (data loading, debounce)
         └── lib/             formatting helpers
 ```
 
-## Design notes
-
-Two rules explain most of the backend:
-
-1. **The event log is the truth; `applications.status` is a cached projection.**
-   Exactly one function assigns that column, and it always writes a
-   `status_changed` timeline event in the same transaction. Status therefore
-   cannot change without the history explaining it — which is why `PATCH` rejects
-   a `status` field and there is a dedicated `POST /applications/{id}/status`.
-
-2. **Documents are named after the SHA-256 of their own contents.** The same file
-   is never stored twice, an existing document can never be silently altered, and
-   an uploaded filename is never used to build a filesystem path.
-
 ## Status
 
-- Phase 0 — project skeleton, Docker, Alembic ✅
-- Phase 1 — applications + timeline + status service ✅
-- Phase 2 — document library + submitted CV ✅
-- Phase 3 — React UI ✅
-- Phase 3.5 — use it daily for two weeks before adding anything
-- Later — Chrome extension, Gmail ingestion, Claude fallback, scheduled jobs
+JobOps is an active personal project that I use to track my own job applications.
+The core application is functional end to end: creating and managing applications,
+status history, the document library, and submitted-CV tracking all work.
+
+Possible future directions include a browser extension for capturing postings and
+optional email ingestion, but these are exploratory and not part of the current
+application.

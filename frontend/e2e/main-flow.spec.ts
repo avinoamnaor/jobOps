@@ -30,7 +30,10 @@ test.describe('main user flow', () => {
     await page.getByRole('link', { name: 'New application' }).click()
     await expect(page).toHaveURL(/\/applications\/new$/)
 
-    await page.getByLabel('Company').fill('ProgrammaticX Ltd.')
+    // Target the input by role: once the Channel <select> loads its options,
+    // its accessible name includes the text "Company Site", so a bare
+    // getByLabel('Company') would match two controls.
+    await page.getByRole('textbox', { name: 'Company' }).fill('ProgrammaticX Ltd.')
     await page.getByLabel('Role').fill('Fullstack Developer (m/f/d)')
     await page.getByLabel('Channel').selectOption('linkedin')
     await page.getByLabel('Location').fill('Tel Aviv')

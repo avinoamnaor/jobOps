@@ -40,7 +40,7 @@ test.describe('accessibility and usability', () => {
     await page.goto('/applications/new')
 
     // The first field is focused on arrival, so typing can begin immediately.
-    await expect(page.getByLabel('Company')).toBeFocused()
+    await expect(page.getByRole('textbox', { name: 'Company' })).toBeFocused()
 
     await page.keyboard.type('Keyboard Co')
     await page.keyboard.press('Tab')

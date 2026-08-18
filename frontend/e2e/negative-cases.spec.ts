@@ -11,7 +11,7 @@ test.describe('validation and error handling', () => {
 
     // Native `required` validation keeps us on the page and focuses the field.
     await expect(page).toHaveURL(/\/applications\/new$/)
-    const company = page.getByLabel('Company')
+    const company = page.getByRole('textbox', { name: 'Company' })
     expect(await company.evaluate((el: HTMLInputElement) => el.validity.valueMissing)).toBe(true)
   })
 
@@ -20,7 +20,7 @@ test.describe('validation and error handling', () => {
 
     // Fill the browser-required fields, then make the backend reject it. A role
     // longer than 200 characters passes HTML validation and fails Pydantic's.
-    await page.getByLabel('Company').fill('Acme')
+    await page.getByRole('textbox', { name: 'Company' }).fill('Acme')
     await page.getByLabel('Role').fill('R'.repeat(250))
     await page.getByRole('button', { name: 'Create application' }).click()
 
@@ -61,18 +61,19 @@ test.describe('validation and error handling', () => {
   })
 
   test('retry recovers once the backend is reachable again', async ({ page }) => {
-    let failNext = true
-    await page.route(`${API_BASE}/applications**`, (route) => {
-      if (failNext) {
-        failNext = false
-        return route.abort('connectionrefused')
-      }
-      return route.continue()
-    })
+    // Fail every /applications request until we explicitly allow them through.
+    // A one-shot toggle is unreliable: React StrictMode double-invokes effects
+    // in development, so the initial load fires the request more than once and a
+    // "fail only the first" flag would let the second succeed.
+    let shouldFail = true
+    await page.route(`${API_BASE}/applications**`, (route) =>
+      shouldFail ? route.abort('connectionrefused') : route.continue(),
+    )
 
     await page.goto('/')
     await expect(page.getByRole('alert')).toBeVisible()
 
+    shouldFail = false
     await page.getByRole('button', { name: 'Try again' }).click()
 
     await expect(page.getByRole('alert')).toHaveCount(0)

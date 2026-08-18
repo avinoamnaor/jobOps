@@ -124,14 +124,18 @@ export function SubmittedCvPanel({ applicationId, submittedCv, onChanged }: Prop
       </form>
 
       <div className="upload-inline">
-        <label className="label">Or upload a new CV</label>
-        <input
-          ref={fileInput}
-          type="file"
-          className="input"
-          disabled={busy}
-          onChange={uploadAndAttach}
-        />
+        {/* The label wraps the input so it is programmatically associated with
+            it, matching the file field on the Documents page. */}
+        <label className="field">
+          <span className="label">Or upload a new CV</span>
+          <input
+            ref={fileInput}
+            type="file"
+            className="input"
+            disabled={busy}
+            onChange={uploadAndAttach}
+          />
+        </label>
         <p className="hint">
           Uploads and attaches in one step. Identical files are detected and reused rather than
           stored twice. See the <Link to="/documents">document library</Link>.
