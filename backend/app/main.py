@@ -9,17 +9,26 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import applications, documents, health, meta
+from app.api import applications, documents, gmail, health, meta, suggestions
 from app.config import settings
 from app.core.errors import (
+    ApplicationExportFailed,
     ApplicationNotFound,
     DocumentFileMissing,
     DocumentKindNotAllowed,
     DocumentNotFound,
     DocumentTooLarge,
+    EmailMessageNotFound,
     EmptyDocument,
+    ExportRequiresSubmittedCv,
+    FolderOpenFailed,
+    GmailNotConnected,
+    GmailSyncFailed,
     StatusUnchanged,
+    SubmittedCvRequired,
     SubmittedCvUnchanged,
+    SuggestionAlreadyResolved,
+    SuggestionNotFound,
     UnsafeDocumentPath,
 )
 
@@ -76,6 +85,29 @@ def handle_document_kind_not_allowed(_: Request, exc: DocumentKindNotAllowed) ->
     return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
+@app.exception_handler(SubmittedCvRequired)
+def handle_submitted_cv_required(_: Request, exc: SubmittedCvRequired) -> JSONResponse:
+    # 422: understood, but this status change/creation is not allowed without a CV.
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
+@app.exception_handler(ExportRequiresSubmittedCv)
+def handle_export_requires_cv(_: Request, exc: ExportRequiresSubmittedCv) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
+@app.exception_handler(ApplicationExportFailed)
+def handle_application_export_failed(_: Request, exc: ApplicationExportFailed) -> JSONResponse:
+    # 500: the application is saved; only the on-disk convenience copy failed.
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+
+@app.exception_handler(FolderOpenFailed)
+def handle_folder_open_failed(_: Request, exc: FolderOpenFailed) -> JSONResponse:
+    # 500: the folder is prepared; only launching the file manager failed.
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+
 @app.exception_handler(EmptyDocument)
 def handle_empty_document(_: Request, exc: EmptyDocument) -> JSONResponse:
     return JSONResponse(status_code=422, content={"detail": str(exc)})
@@ -100,7 +132,39 @@ def handle_unsafe_document_path(_: Request, exc: UnsafeDocumentPath) -> JSONResp
     return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
+@app.exception_handler(SuggestionNotFound)
+def handle_suggestion_not_found(_: Request, exc: SuggestionNotFound) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(SuggestionAlreadyResolved)
+def handle_suggestion_already_resolved(_: Request, exc: SuggestionAlreadyResolved) -> JSONResponse:
+    # 409: the request was well-formed, but conflicts with the suggestion's
+    # current (already-resolved) state.
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(GmailNotConnected)
+def handle_gmail_not_connected(_: Request, exc: GmailNotConnected) -> JSONResponse:
+    # 503: the JobOps API itself is fine, but the external dependency it needs
+    # (an authorized Gmail token) is not ready yet.
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(GmailSyncFailed)
+def handle_gmail_sync_failed(_: Request, exc: GmailSyncFailed) -> JSONResponse:
+    # 502: we had a token, but the call to the upstream Gmail API itself failed.
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+@app.exception_handler(EmailMessageNotFound)
+def handle_email_message_not_found(_: Request, exc: EmailMessageNotFound) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
 app.include_router(health.router)
 app.include_router(meta.router)
 app.include_router(applications.router)
 app.include_router(documents.router)
+app.include_router(suggestions.router)
+app.include_router(gmail.router)

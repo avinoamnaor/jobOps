@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "JobOps Capture",
+  "version": "0.3.0",
+  "description": "Capture a job page and open it as a pre-filled JobOps New Application (prefill only, no auto-create).",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["http://localhost:5173/*"],
+  "action": {
+    "default_title": "JobOps Capture",
+    "default_popup": "popup.html"
+  }
+}

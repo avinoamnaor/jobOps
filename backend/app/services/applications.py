@@ -25,10 +25,12 @@ from app.core.errors import (
     ApplicationNotFound,
     DocumentKindNotAllowed,
     StatusUnchanged,
+    SubmittedCvRequired,
     SubmittedCvUnchanged,
 )
 from app.core.normalize import canonicalize_url, normalize_company, normalize_role
 from app.enums import (
+    STATUSES_REQUIRING_SUBMITTED_CV,
     TERMINAL_STATUSES,
     ApplicationChannel,
     ApplicationStatus,
@@ -178,7 +180,24 @@ def create_application(db: Session, data: ApplicationCreate) -> Application:
     The `created` event carries `new_status`, so replaying the log reproduces the
     status from the very first entry. Emitting a separate `status_changed` event
     on creation would mean two rows saying the same thing.
+
+    A submitted CV may be supplied so a real application can be recorded in one
+    step (fill details -> choose Applied -> pick the CV -> create). It is
+    validated the same way `attach_submitted_cv` validates, and the application,
+    its `created` event, and the `document_attached` event all commit together.
     """
+    # Validate the CV up front (if given), so we never create anything on a bad
+    # reference. get_document raises DocumentNotFound; kind is checked here.
+    cv_document = None
+    if data.submitted_cv_document_id is not None:
+        cv_document = get_document(db, data.submitted_cv_document_id)
+        if cv_document.kind != DocumentKind.CV:
+            raise DocumentKindNotAllowed(cv_document.id, cv_document.kind, DocumentKind.CV.value)
+
+    # A submitted-state status requires a CV. `saved` may have one, but need not.
+    if data.status in STATUSES_REQUIRING_SUBMITTED_CV and cv_document is None:
+        raise SubmittedCvRequired(data.status.value, on_create=True)
+
     now = _utcnow()
 
     application = Application(
@@ -196,6 +215,7 @@ def create_application(db: Session, data: ApplicationCreate) -> Application:
         location=data.location,
         work_mode=data.work_mode,
         notes=data.notes,
+        submitted_cv_document_id=data.submitted_cv_document_id,
     )
     db.add(application)
     # flush() sends the INSERT so PostgreSQL assigns an id we can reference from
@@ -212,6 +232,22 @@ def create_application(db: Session, data: ApplicationCreate) -> Application:
         note=None,
         occurred_at=now,
     )
+
+    # Record the submitted CV on the timeline too, matching attach_submitted_cv.
+    if cv_document is not None:
+        document_name = (
+            cv_document.label or cv_document.original_filename or f"document {cv_document.id}"
+        )
+        db.add(
+            ApplicationEvent(
+                application_id=application.id,
+                event_type=EventType.DOCUMENT_ATTACHED.value,
+                occurred_at=now,
+                source=EventSource.MANUAL.value,
+                document_id=cv_document.id,
+                summary=f"Submitted CV attached: {document_name}"[:300],
+            )
+        )
 
     # An explicitly supplied applied_at wins over the one inferred above.
     if data.applied_at is not None:
@@ -242,6 +278,14 @@ def change_status(
 
     if application.status == to_status.value:
         raise StatusUnchanged(application.status)
+
+    # A submitted-state status may not be recorded without knowing which CV was
+    # sent. `saved` and the terminal/hold statuses are exempt.
+    if (
+        to_status in STATUSES_REQUIRING_SUBMITTED_CV
+        and application.submitted_cv_document_id is None
+    ):
+        raise SubmittedCvRequired(to_status.value)
 
     previous_status = application.status
     when = occurred_at or _utcnow()

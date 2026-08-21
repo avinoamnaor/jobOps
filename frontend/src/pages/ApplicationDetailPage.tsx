@@ -142,6 +142,7 @@ export function ApplicationDetailPage() {
               applicationId={app.id}
               currentStatus={app.status}
               meta={meta.data}
+              hasSubmittedCv={app.submitted_cv_document_id !== null}
               onChanged={refresh}
             />
           </section>

@@ -60,15 +60,15 @@ test.describe('main user flow', () => {
     await page
       .getByLabel('Or upload a new CV')
       .setInputFiles({
-        name: 'Avinoam_CV_v3.pdf',
+        name: 'Demo_CV_v3.pdf',
         mimeType: 'application/pdf',
         buffer: fakePdf('CV v3 node heavy'),
       })
 
     const cvPanel = page.locator('section').filter({ hasText: 'SUBMITTED CV' }).first()
-    await expect(cvPanel.getByText('Avinoam_CV_v3.pdf').first()).toBeVisible()
+    await expect(cvPanel.getByText('Demo_CV_v3.pdf').first()).toBeVisible()
     // The attachment is recorded on the timeline.
-    await expect(page.getByText('Submitted CV attached: Avinoam_CV_v3.pdf')).toBeVisible()
+    await expect(page.getByText('Submitted CV attached: Demo_CV_v3.pdf')).toBeVisible()
 
     // --- 6. Change status -------------------------------------------------
     await page.getByLabel('Move to status').selectOption('applied')
@@ -110,7 +110,7 @@ test.describe('main user flow', () => {
     await cvPanel.getByRole('link', { name: 'Download' }).click()
     const download = await downloadPromise
 
-    expect(download.suggestedFilename()).toBe('Avinoam_CV_v3.pdf')
+    expect(download.suggestedFilename()).toBe('Demo_CV_v3.pdf')
     const downloadPath = await download.path()
     const { readFileSync } = await import('node:fs')
     expect(readFileSync(downloadPath!)).toEqual(fakePdf('CV v3 node heavy'))

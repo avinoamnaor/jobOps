@@ -61,13 +61,15 @@ class TestListing:
 
     def test_filter_by_status(self, client: TestClient) -> None:
         _create(client, company_name="Saved Co")
-        applied = _create(client, company_name="Applied Co", status="applied")
+        # `on_hold` is a non-submitted status, so it can be created directly
+        # without a CV — enough to exercise the status filter.
+        on_hold = _create(client, company_name="On Hold Co", status="on_hold")
 
-        response = client.get("/applications", params={"status": "applied"})
+        response = client.get("/applications", params={"status": "on_hold"})
 
         body = response.json()
         assert body["total"] == 1
-        assert body["items"][0]["id"] == applied["id"]
+        assert body["items"][0]["id"] == on_hold["id"]
 
     def test_search_matches_company_or_role(self, client: TestClient) -> None:
         _create(client, company_name="ProgrammaticX", role_title="Fullstack Developer")
@@ -88,10 +90,35 @@ class TestListing:
 
 
 class TestStatusEndpoint:
+    def _attach_cv(self, client: TestClient, application_id: int) -> None:
+        document = client.post(
+            "/documents",
+            files={"file": ("cv.pdf", b"%PDF-1.4 demo cv\n%%EOF", "application/pdf")},
+            data={"kind": "cv"},
+        ).json()
+        assert (
+            client.put(
+                f"/applications/{application_id}/submitted-cv",
+                json={"document_id": document["id"]},
+            ).status_code
+            == 200
+        )
+
+    def test_status_change_to_submitted_status_without_cv_returns_422(
+        self, client: TestClient
+    ) -> None:
+        created = _create(client)
+
+        response = client.post(f"/applications/{created['id']}/status", json={"to": "applied"})
+
+        assert response.status_code == 422
+        assert "submitted CV" in response.json()["detail"]
+
     def test_status_change_returns_updated_application_with_event(
         self, client: TestClient
     ) -> None:
         created = _create(client)
+        self._attach_cv(client, created["id"])
 
         response = client.post(
             f"/applications/{created['id']}/status",
@@ -220,3 +247,42 @@ class TestMetaEndpoint:
         event_types = {entry["value"]: entry for entry in body["event_types"]}
         assert event_types["note_added"]["manually_addable"] is True
         assert event_types["status_changed"]["manually_addable"] is False
+
+
+class TestDuplicateCheckEndpoint:
+    def test_returns_a_possible_match_for_same_company_and_role(self, client: TestClient) -> None:
+        created = _create(client, company_name="Harmonic", role_title="Junior SW Engineer")
+
+        response = client.post(
+            "/applications/duplicate-check",
+            json={"company_name": "Harmonic", "role_title": "Junior SW Engineer"},
+        )
+
+        assert response.status_code == 200, response.text
+        matches = response.json()
+        assert len(matches) == 1
+        assert matches[0]["application_id"] == created["id"]
+        assert matches[0]["confidence"] == "possible"
+        assert matches[0]["status"] == "saved"
+
+    def test_returns_empty_list_when_nothing_matches(self, client: TestClient) -> None:
+        response = client.post(
+            "/applications/duplicate-check",
+            json={"company_name": "No Such Company", "role_title": "No Such Role"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_does_not_create_or_modify_anything(self, client: TestClient) -> None:
+        client.post(
+            "/applications/duplicate-check",
+            json={"company_name": "Harmonic", "role_title": "Junior SW Engineer"},
+        )
+
+        assert client.get("/applications").json()["total"] == 0
+
+    def test_rejects_missing_required_fields(self, client: TestClient) -> None:
+        response = client.post("/applications/duplicate-check", json={"company_name": "Harmonic"})
+
+        assert response.status_code == 422

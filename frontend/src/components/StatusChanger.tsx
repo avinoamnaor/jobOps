@@ -10,6 +10,8 @@ interface Props {
   applicationId: number
   currentStatus: ApplicationStatus
   meta: MetaEnums | null
+  /** Whether a submitted CV is currently attached to this application. */
+  hasSubmittedCv: boolean
   /** Called after a successful change so the page can refetch. */
   onChanged: () => void
 }
@@ -22,13 +24,25 @@ interface Props {
  * the status column, so routing status changes through it is what keeps the
  * history complete.
  */
-export function StatusChanger({ applicationId, currentStatus, meta, onChanged }: Props) {
+export function StatusChanger({
+  applicationId,
+  currentStatus,
+  meta,
+  hasSubmittedCv,
+  onChanged,
+}: Props) {
   const [target, setTarget] = useState<ApplicationStatus>(currentStatus)
   const [note, setNote] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
 
   const unchanged = target === currentStatus
+
+  // Mirrors the backend rule: a submitted-state status needs a CV on file. We
+  // block it here for a clear prompt; the backend enforces it authoritatively.
+  const targetRequiresCv =
+    meta?.statuses.find((entry) => entry.value === target)?.requires_submitted_cv ?? false
+  const blockedForMissingCv = targetRequiresCv && !hasSubmittedCv
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
@@ -78,10 +92,20 @@ export function StatusChanger({ applicationId, currentStatus, meta, onChanged }:
         />
       </label>
 
-      <button type="submit" className="btn btn-primary" disabled={saving || unchanged}>
+      <button
+        type="submit"
+        className="btn btn-primary"
+        disabled={saving || unchanged || blockedForMissingCv}
+      >
         {saving ? 'Saving…' : 'Record status change'}
       </button>
       {unchanged && <p className="hint">Pick a different status to record a change.</p>}
+      {!unchanged && blockedForMissingCv && (
+        <p className="hint">
+          “{humanize(target)}” means the application was submitted. Attach the submitted CV below
+          first, then record this change.
+        </p>
+      )}
     </form>
   )
 }

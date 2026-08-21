@@ -1,15 +1,40 @@
 """Document library business logic."""
 
 from collections.abc import Sequence
+from pathlib import PurePosixPath
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.errors import DocumentFileMissing, DocumentNotFound, DocumentTooLarge, EmptyDocument
-from app.core.storage import DocumentStorage, compute_content_hash, document_storage
+from app.core.storage import (
+    DocumentStorage,
+    compute_content_hash,
+    document_storage,
+    safe_extension,
+    safe_header_filename,
+)
 from app.enums import DocumentKind
 from app.models.document import Document
+
+
+def submission_filename(document: Document) -> str:
+    """The filename to present when downloading a CV 'for submission'.
+
+    Uses the configured submission name but keeps the stored file's real
+    extension, so the bytes' format is never mislabelled. This changes only the
+    Content-Disposition filename — the stored document's hash, original filename
+    and row are untouched, and the bytes served are byte-identical.
+    """
+    configured = settings.submission_cv_filename
+    suffix = PurePosixPath(configured).suffix
+    stem = configured[: -len(suffix)] if suffix else configured
+    # The stored path is `<hash><ext>`, so its suffix is the file's real extension.
+    extension = PurePosixPath(document.stored_path).suffix or safe_extension(
+        document.original_filename
+    )
+    return safe_header_filename(f"{stem}{extension}", fallback="CV.pdf")
 
 
 def store_document(

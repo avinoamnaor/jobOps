@@ -113,9 +113,11 @@ class TestUnknownFieldsAreRejected:
     def test_status_change_still_works_with_valid_fields(self, client: TestClient) -> None:
         created = _create(client)
 
+        # `on_hold` needs no submitted CV, keeping this test focused on schema
+        # validation rather than the CV rule.
         response = client.post(
             f"/applications/{created['id']}/status",
-            json={"to": "applied", "note": "valid"},
+            json={"to": "on_hold", "note": "valid"},
         )
 
         assert response.status_code == 200

@@ -99,6 +99,52 @@ export interface ApplicationDetail extends Application {
   submitted_cv: JobDocument | null
 }
 
+export interface ApplicationFolderExport {
+  folder: string
+  path: string
+}
+
+/** Advisory duplicate-detection request/response — see POST /applications/duplicate-check. */
+export interface DuplicateCheckPayload {
+  company_name: string
+  role_title: string
+  job_url?: string | null
+  job_description?: string | null
+}
+
+export type DuplicateConfidence = 'strong' | 'possible'
+
+export interface DuplicateMatch {
+  application_id: number
+  company_name: string
+  role_title: string
+  status: ApplicationStatus
+  applied_at: string | null
+  confidence: DuplicateConfidence
+  reason: string
+}
+
+/** A proposed status change awaiting review — see POST /suggestions and friends. */
+export type SuggestionSource = 'manual' | 'gmail' | 'claude'
+export type SuggestionConfidence = 'high' | 'medium' | 'low'
+export type SuggestionState = 'pending' | 'accepted' | 'rejected'
+
+export interface Suggestion {
+  id: number
+  application_id: number
+  proposed_status: ApplicationStatus
+  source: SuggestionSource
+  confidence: SuggestionConfidence
+  rationale: string
+  state: SuggestionState
+  created_at: string
+  resolved_at: string | null
+  // Application context embedded so the review list needs no second request.
+  company_name: string
+  role_title: string
+  current_status: ApplicationStatus
+}
+
 export interface ApplicationPage {
   items: Application[]
   total: number
@@ -124,6 +170,8 @@ export interface ApplicationCreatePayload {
   work_mode?: string | null
   notes?: string | null
   applied_at?: string | null
+  /** The CV submitted, when recording an already-applied application. */
+  submitted_cv_document_id?: number | null
 }
 
 /**
@@ -164,6 +212,7 @@ export interface MetaEnums {
     is_terminal: boolean
     is_active: boolean
     stage_order: number | null
+    requires_submitted_cv: boolean
   }[]
   event_types: { value: EventType; manually_addable: boolean }[]
   application_channels: ApplicationChannel[]

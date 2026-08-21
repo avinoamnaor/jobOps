@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        width: 380px;
+        margin: 0;
+        padding: 12px;
+        font: 13px -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: #1c2530;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0 0 6px;
+      }
+      label {
+        display: block;
+        font-size: 11px;
+        font-weight: 600;
+        color: #66727f;
+        margin: 8px 0 3px;
+      }
+      input,
+      textarea,
+      select {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #cbd2d9;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font: inherit;
+      }
+      input[readonly] {
+        background: #f4f5f7;
+        color: #37414d;
+      }
+      textarea {
+        resize: vertical;
+        min-height: 150px;
+      }
+      details {
+        margin-top: 8px;
+      }
+      summary {
+        font-size: 11px;
+        font-weight: 600;
+        color: #66727f;
+        cursor: pointer;
+      }
+      .status {
+        font-size: 11px;
+        color: #66727f;
+        margin: 10px 0 8px;
+        min-height: 14px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+      }
+      button {
+        padding: 7px 12px;
+        border-radius: 6px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .primary {
+        flex: 1;
+        border: 1px solid #2f6feb;
+        background: #2f6feb;
+        color: #fff;
+      }
+      .secondary {
+        border: 1px solid #cbd2d9;
+        background: #fff;
+        color: #1c2530;
+      }
+      .hint {
+        font-size: 11px;
+        color: #66727f;
+        margin: 6px 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>JobOps Capture</h1>
+
+    <label for="company">Company</label>
+    <input id="company" type="text" placeholder="Best-effort guess — edit if wrong" />
+
+    <label for="role">Role</label>
+    <input id="role" type="text" placeholder="Best-effort guess — edit if wrong" />
+
+    <label for="location">Location</label>
+    <input id="location" type="text" placeholder="Best-effort — edit if wrong" />
+
+    <label for="work_mode">Work mode</label>
+    <input id="work_mode" type="text" placeholder="Remote / Hybrid / On-site" />
+
+    <label for="channel">Application channel</label>
+    <select id="channel">
+      <option value="linkedin">LinkedIn</option>
+      <option value="company_site">Company site</option>
+      <option value="recruiter">Recruiter</option>
+      <option value="referral">Referral</option>
+      <option value="job_board">Job board</option>
+      <option value="other">Other</option>
+    </select>
+
+    <label for="url">Page URL</label>
+    <input id="url" type="text" />
+
+    <label for="text">Job description (editable)</label>
+    <textarea id="text" spellcheck="false"></textarea>
+
+    <details>
+      <summary>Page title</summary>
+      <input id="title" type="text" readonly />
+    </details>
+
+    <p id="status" class="status"></p>
+
+    <div class="row">
+      <button id="open" type="button" class="primary">Open in JobOps</button>
+      <button id="recapture" type="button" class="secondary">Recapture</button>
+    </div>
+    <p class="hint">
+      Opens the JobOps New Application form pre-filled. You still choose status and
+      CV and click Create Application yourself.
+    </p>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

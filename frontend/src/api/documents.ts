@@ -40,3 +40,11 @@ export function uploadDocument({ file, kind, label, notes }: UploadDocumentInput
 export function documentDownloadUrl(id: number): string {
   return apiUrl(`/documents/${id}/download`)
 }
+
+/**
+ * Download URL that serves the same bytes under a clean, employer-facing
+ * filename (configured server-side). The stored document is unchanged.
+ */
+export function documentSubmissionDownloadUrl(id: number): string {
+  return apiUrl(`/documents/${id}/download?submission=true`)
+}

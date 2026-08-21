@@ -15,7 +15,45 @@ from app.core.storage import (
     compute_content_hash,
     safe_extension,
     safe_header_filename,
+    sanitize_windows_component,
 )
+
+
+class TestSanitizeWindowsComponent:
+    def test_keeps_a_normal_company_role_name(self) -> None:
+        assert (
+            sanitize_windows_component("Harmonic - Junior SW Development Engineer")
+            == "Harmonic - Junior SW Development Engineer"
+        )
+
+    @pytest.mark.parametrize("bad", '<>:"/\\|?*')
+    def test_removes_windows_invalid_characters(self, bad: str) -> None:
+        result = sanitize_windows_component(f"Ac{bad}me - Dev{bad}Role")
+        assert bad not in result
+        # Never becomes a path separator or escapes its component.
+        assert "/" not in result and "\\" not in result
+
+    def test_collapses_whitespace_left_by_removed_characters(self) -> None:
+        assert sanitize_windows_component("R&D:  Backend / Infra") == "R&D Backend Infra"
+
+    def test_strips_trailing_dots_and_spaces(self) -> None:
+        # Windows silently drops these, which would desync the folder name.
+        assert sanitize_windows_component("Acme Corp. ") == "Acme Corp"
+
+    def test_control_characters_are_removed(self) -> None:
+        assert sanitize_windows_component("Ac\x00me\t- Role") == "Ac me - Role"
+
+    @pytest.mark.parametrize("reserved", ["CON", "con", "PRN", "nul", "COM1", "LPT9"])
+    def test_reserved_device_names_are_escaped(self, reserved: str) -> None:
+        result = sanitize_windows_component(reserved)
+        assert result.startswith("_")
+
+    def test_empty_after_cleaning_uses_fallback(self) -> None:
+        assert sanitize_windows_component("///", fallback="untitled") == "untitled"
+
+    def test_length_is_bounded(self) -> None:
+        result = sanitize_windows_component("A" * 500, max_length=120)
+        assert len(result) <= 120
 
 
 class TestContentHash:
@@ -37,7 +75,7 @@ class TestSafeExtension:
         ("filename", "expected"),
         [
             ("cv.pdf", ".pdf"),
-            ("Avinoam_CV.PDF", ".pdf"),
+            ("Applicant_CV.PDF", ".pdf"),
             ("resume.docx", ".docx"),
             ("archive.tar.gz", ".gz"),
             ("no_extension", ""),

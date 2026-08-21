@@ -62,8 +62,19 @@ def get_document(document_id: int, db: Session = Depends(get_db)) -> object:
 
 
 @router.get("/{document_id}/download")
-def download_document(document_id: int, db: Session = Depends(get_db)) -> FileResponse:
+def download_document(
+    document_id: int,
+    submission: bool = Query(
+        default=False,
+        description="Serve with a clean, employer-facing submission filename.",
+    ),
+    db: Session = Depends(get_db),
+) -> FileResponse:
     """Send the file's bytes.
+
+    With `?submission=true` the exact same bytes are served under a clean,
+    employer-facing filename (see SUBMISSION_CV_FILENAME) — a download-only
+    convenience. The stored document is never renamed or modified.
 
     Always served as an attachment. Serving user-supplied files inline from the
     same origin as the API is how a stored HTML or SVG file turns into a
@@ -73,12 +84,17 @@ def download_document(document_id: int, db: Session = Depends(get_db)) -> FileRe
     document = document_service.get_document(db, document_id)
     path = document_service.resolve_document_file(document)
 
+    if submission:
+        download_name = document_service.submission_filename(document)
+    else:
+        # Sanitised so a filename containing quotes or newlines cannot inject
+        # extra HTTP headers.
+        download_name = safe_header_filename(
+            document.original_filename, fallback=f"document-{document.id}"
+        )
+
     return FileResponse(
         path=path,
         media_type=document.content_type or "application/octet-stream",
-        # Sanitised so a filename containing quotes or newlines cannot inject
-        # extra HTTP headers.
-        filename=safe_header_filename(
-            document.original_filename, fallback=f"document-{document.id}"
-        ),
+        filename=download_name,
     )

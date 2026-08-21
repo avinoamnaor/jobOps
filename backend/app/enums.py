@@ -120,6 +120,24 @@ STAGE_ORDER: dict[ApplicationStatus, int] = {
     ApplicationStatus.OFFER: 7,
 }
 
+# Statuses that mean the application has actually been submitted, and therefore
+# require a recorded submitted CV. `saved` is deliberately excluded — a posting
+# may be saved before applying. The terminal/hold statuses (rejected, withdrawn,
+# on_hold) are also excluded: you can reach them from `saved` without ever having
+# submitted (e.g. deciding not to apply, or a posting freezing before you did).
+STATUSES_REQUIRING_SUBMITTED_CV: frozenset[ApplicationStatus] = frozenset(
+    {
+        ApplicationStatus.APPLIED,
+        ApplicationStatus.RECRUITER_CONTACT,
+        ApplicationStatus.HR_INTERVIEW,
+        ApplicationStatus.TECHNICAL_INTERVIEW,
+        ApplicationStatus.TAKE_HOME,
+        ApplicationStatus.FINAL_INTERVIEW,
+        ApplicationStatus.OFFER,
+        ApplicationStatus.ACCEPTED,
+    }
+)
+
 # Events that carry a status. Replaying these reconstructs `Application.status`.
 STATUS_BEARING_EVENT_TYPES: frozenset[EventType] = frozenset(
     {EventType.CREATED, EventType.STATUS_CHANGED}
@@ -129,6 +147,41 @@ STATUS_BEARING_EVENT_TYPES: frozenset[EventType] = frozenset(
 # are produced only by the service layer, so that a hand-written event can never
 # silently rewrite an application's status.
 MANUAL_EVENT_TYPES: frozenset[EventType] = frozenset(EventType) - STATUS_BEARING_EVENT_TYPES
+
+
+class SuggestionSource(StrEnum):
+    """Where a proposed status change came from.
+
+    `MANUAL` is what makes suggestions creatable and testable now, before any
+    integration exists. `GMAIL` and `CLAUDE` are reserved for later phases —
+    adding this vocabulary now, rather than when Gmail/Claude land, is what
+    "keep this architecture ready" means: those phases add a producer, not a
+    schema change.
+    """
+
+    MANUAL = "manual"
+    GMAIL = "gmail"
+    CLAUDE = "claude"
+
+
+class SuggestionConfidence(StrEnum):
+    """How sure the producer is. Advisory — never affects what accepting does."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class SuggestionState(StrEnum):
+    """A suggestion's place in its (short) lifecycle.
+
+    PENDING is the only state a suggestion can be acted on from. ACCEPTED and
+    REJECTED are both final — resolved once, never re-processed.
+    """
+
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
 
 
 def sql_value_list(enum_cls: type[StrEnum]) -> str:

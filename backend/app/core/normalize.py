@@ -118,3 +118,52 @@ def canonicalize_url(url: str | None) -> str | None:
 
     # Fragments (#section) are browser-side only and never identify the posting.
     return urlunparse((parsed.scheme.lower(), host, path, "", urlencode(kept_params), ""))
+
+
+# Query-parameter names (normalised to alphanumerics) that carry a job/requisition
+# id. Generic — no site-specific handling.
+_JOB_ID_KEYS = {
+    "jobid", "id", "ghjid", "requisitionid", "requisition", "currentjobid",
+    "position", "posting", "vacancy", "reqid", "req", "jid", "leverid", "gh",
+}
+_NUMERIC_SEGMENT = re.compile(r"^\d{2,}$")
+
+
+def extract_job_id(url: str | None) -> str | None:
+    """Best-effort meaningful job/requisition id from a URL.
+
+    Looks first at id-like query parameters (e.g. `job_id`, `gh_jid`,
+    `requisitionId`), then at a numeric path segment (e.g. `/jobs/4821`). Returns
+    None when nothing id-like is present — a role slug like
+    `/careers/senior-backend-engineer` is deliberately not treated as an id.
+    """
+    canonical = canonicalize_url(url)
+    if canonical is None:
+        return None
+
+    parsed = urlparse(canonical)
+    for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+        if normalized_key in _JOB_ID_KEYS and value.strip():
+            return value.strip()
+
+    numeric_segments = [
+        segment for segment in parsed.path.split("/") if _NUMERIC_SEGMENT.match(segment)
+    ]
+    if numeric_segments:
+        # The longest numeric segment is the most id-like.
+        return max(numeric_segments, key=len)
+
+    return None
+
+
+def normalize_description(text: str | None) -> str:
+    """Collapse a job description to a stable comparison string.
+
+    Lowercased with runs of whitespace flattened to single spaces, so trivial
+    formatting differences (extra blank lines, trailing spaces) do not defeat a
+    "same description" comparison. Returns "" for empty input.
+    """
+    if not text:
+        return ""
+    return " ".join(text.split()).lower()

@@ -2,8 +2,10 @@
   "compilerOptions": {
     "target": "ES2022",
     // DOM is needed because Playwright's page.evaluate() callbacks are written
-    // here but execute inside the browser.
-    "lib": ["ES2023", "DOM"],
+    // here but execute inside the browser. DOM.Iterable comes with it: those
+    // callbacks spread NodeLists ([...document.querySelectorAll(...)]), which
+    // does not typecheck with plain DOM.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
     "moduleResolution": "bundler",

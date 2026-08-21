@@ -7,7 +7,13 @@ built entirely on top of these functions.
 
 import pytest
 
-from app.core.normalize import canonicalize_url, normalize_company, normalize_role
+from app.core.normalize import (
+    canonicalize_url,
+    extract_job_id,
+    normalize_company,
+    normalize_description,
+    normalize_role,
+)
 
 
 class TestNormalizeCompany:
@@ -161,3 +167,28 @@ class TestCanonicalizeUrlPreservesMeaningfulParameters:
         )
         # Both meaningful params kept (sorted), tracking dropped.
         assert result == "https://boards.example.com/apply?gh_jid=555&team=platform"
+
+
+class TestExtractJobId:
+    def test_reads_an_id_from_query_params(self) -> None:
+        assert extract_job_id("https://careers.example.com/apply?job_id=987") == "987"
+        assert extract_job_id("https://boards.greenhouse.io/acme/jobs/1?gh_jid=555") == "555"
+
+    def test_reads_a_numeric_path_segment(self) -> None:
+        assert extract_job_id("https://www.example.com/jobs/4821/?utm_source=x") == "4821"
+
+    def test_ignores_a_role_slug(self) -> None:
+        assert extract_job_id("https://example.com/careers/senior-backend-engineer") is None
+
+    def test_returns_none_for_missing_or_unusable_url(self) -> None:
+        assert extract_job_id(None) is None
+        assert extract_job_id("not a url") is None
+
+
+class TestNormalizeDescription:
+    def test_collapses_whitespace_and_lowercases(self) -> None:
+        assert normalize_description("Build   things\nend to  end.") == "build things end to end."
+
+    def test_empty_input(self) -> None:
+        assert normalize_description(None) == ""
+        assert normalize_description("   ") == ""

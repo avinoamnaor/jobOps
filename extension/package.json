@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Node treats these .js files as ES modules so guess.js can be unit-tested and imported by popup.js. Chrome ignores this file; it loads only manifest.json."
+}

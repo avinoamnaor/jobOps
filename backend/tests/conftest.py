@@ -37,7 +37,15 @@ from app.main import app
 BACKEND_ROOT = PROJECT_ROOT / "backend"
 
 # Order matters: children before parents, so foreign keys never block us.
-_TABLES_IN_DELETION_ORDER = ("application_events", "applications", "documents")
+# (`suggestions` is not listed: it has no children, and TRUNCATE ... CASCADE on
+# `applications` already takes it with it via the FK. `email_messages` has no FK
+# to anything — nothing else truncates it — so it must be listed explicitly.)
+_TABLES_IN_DELETION_ORDER = (
+    "application_events",
+    "applications",
+    "documents",
+    "email_messages",
+)
 
 # The ONLY database this suite is ever allowed to destroy.
 REQUIRED_TEST_DATABASE_NAME = "jobops_test"

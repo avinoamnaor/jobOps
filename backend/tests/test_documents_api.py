@@ -1,6 +1,7 @@
 """HTTP-level tests for the document library."""
 
 from pathlib import Path
+from urllib.parse import unquote
 
 from fastapi.testclient import TestClient
 
@@ -194,3 +195,56 @@ class TestDownload:
 
         assert response.status_code == 500
         assert "missing from storage" in response.json()["detail"]
+
+
+class TestSubmissionDownload:
+    """Download the same CV bytes under a clean, employer-facing filename."""
+
+    def test_submission_filename_uses_config_and_keeps_extension(self, db_session, monkeypatch):
+        from app.config import settings
+        from app.enums import DocumentKind
+        from app.services.documents import store_document, submission_filename
+
+        monkeypatch.setattr(settings, "submission_cv_filename", "CV - Test User.pdf")
+        document, _ = store_document(
+            db_session,
+            kind=DocumentKind.CV,
+            content=PDF_BYTES,
+            original_filename="Harmonic - Junior SWE.pdf",
+        )
+
+        # Configured name wins; the stored file's real extension is preserved.
+        assert submission_filename(document) == "CV - Test User.pdf"
+
+    def test_submission_download_serves_identical_bytes_with_clean_name(
+        self, client: TestClient, monkeypatch
+    ) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "submission_cv_filename", "CV - Test User.pdf")
+        created, _ = upload(client, filename="Harmonic - Junior SWE.pdf")
+
+        response = client.get(
+            f"/documents/{created['id']}/download", params={"submission": "true"}
+        )
+
+        assert response.status_code == 200
+        # Byte-for-byte identical: nothing is regenerated or rewritten.
+        assert response.content == PDF_BYTES
+        # Filename is RFC 5987 percent-encoded (spaces -> %20), which is exactly
+        # what makes it injection-safe; decode it to check the human name.
+        disposition = unquote(response.headers["content-disposition"])
+        assert "attachment" in disposition
+        assert "CV - Test User.pdf" in disposition
+
+        # The stored document is untouched: original filename and hash preserved.
+        meta = client.get(f"/documents/{created['id']}").json()
+        assert meta["original_filename"] == "Harmonic - Junior SWE.pdf"
+        assert meta["content_hash"] == created["content_hash"]
+
+    def test_normal_download_still_uses_the_original_name(self, client: TestClient) -> None:
+        created, _ = upload(client, filename="Harmonic - Junior SWE.pdf")
+
+        response = client.get(f"/documents/{created['id']}/download")
+
+        assert "Harmonic - Junior SWE.pdf" in unquote(response.headers["content-disposition"])

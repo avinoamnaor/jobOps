@@ -24,6 +24,9 @@ class ApplicationCreate(StrictModel):
     work_mode: str | None = Field(default=None, max_length=32)
     notes: str | None = None
     applied_at: datetime | None = None
+    # Optional: record the CV submitted, so an application can be created as
+    # `applied` in one step. Must reference a document with kind == 'cv'.
+    submitted_cv_document_id: int | None = Field(default=None, gt=0)
 
 
 class ApplicationUpdate(StrictModel):
@@ -103,6 +106,42 @@ class ApplicationDetail(ApplicationRead):
     # The full document, so the UI can show "CV: Fullstack v3 (PDF, 84 KB)"
     # without a second request.
     submitted_cv: DocumentRead | None
+
+
+class ApplicationFolderExport(BaseModel):
+    """Result of preparing an application's local export folder."""
+
+    folder: str
+    path: str
+
+
+class DraftFolderRequest(StrictModel):
+    """Prepare a submission folder before an application row exists."""
+
+    company_name: str = Field(min_length=1, max_length=200)
+    role_title: str = Field(min_length=1, max_length=200)
+    document_id: int = Field(gt=0)
+
+
+class DuplicateCheckRequest(StrictModel):
+    """Candidate job data to check against existing applications (advisory)."""
+
+    company_name: str = Field(min_length=1, max_length=200)
+    role_title: str = Field(min_length=1, max_length=200)
+    job_url: str | None = None
+    job_description: str | None = None
+
+
+class DuplicateMatch(BaseModel):
+    """One possibly-duplicate existing application."""
+
+    application_id: int
+    company_name: str
+    role_title: str
+    status: ApplicationStatus
+    applied_at: datetime | None
+    confidence: str
+    reason: str
 
 
 class ApplicationPage(BaseModel):

@@ -1,12 +1,12 @@
 import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { attachSubmittedCv } from '../api/applications'
+import { attachSubmittedCv, openApplicationFolder } from '../api/applications'
 import type { ApiError } from '../api/client'
 import { documentDownloadUrl, listDocuments, uploadDocument } from '../api/documents'
 import type { JobDocument } from '../api/types'
 import { asApiError, useAsync } from '../hooks/useAsync'
 import { documentName, formatDate, formatFileSize } from '../lib/format'
-import { ErrorBanner } from './Feedback'
+import { ErrorBanner, SuccessBanner } from './Feedback'
 
 interface Props {
   applicationId: number
@@ -29,7 +29,23 @@ export function SubmittedCvPanel({ applicationId, submittedCv, onChanged }: Prop
   const [selectedId, setSelectedId] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
+  const [folderMessage, setFolderMessage] = useState<string | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+
+  async function openFolder() {
+    setBusy(true)
+    setError(null)
+    setFolderMessage(null)
+    try {
+      // Prepares/refreshes the folder if needed, then opens it in File Explorer.
+      const result = await openApplicationFolder(applicationId)
+      setFolderMessage(`Opened ${result.folder}`)
+    } catch (caught) {
+      setError(asApiError(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   async function attachExisting(event: React.FormEvent) {
     event.preventDefault()
@@ -76,6 +92,7 @@ export function SubmittedCvPanel({ applicationId, submittedCv, onChanged }: Prop
       <h2 className="card-title">Submitted CV</h2>
 
       {error && <ErrorBanner error={error} />}
+      {folderMessage && <SuccessBanner message={folderMessage} />}
 
       {submittedCv ? (
         <div className="cv-current">
@@ -89,9 +106,19 @@ export function SubmittedCvPanel({ applicationId, submittedCv, onChanged }: Prop
               {submittedCv.content_hash.slice(0, 16)}…
             </p>
           </div>
-          <a className="btn btn-sm" href={documentDownloadUrl(submittedCv.id)}>
-            Download
-          </a>
+          <div className="cv-actions">
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              disabled={busy}
+              onClick={openFolder}
+            >
+              Open application folder
+            </button>
+            <a className="btn btn-sm" href={documentDownloadUrl(submittedCv.id)}>
+              Download original
+            </a>
+          </div>
         </div>
       ) : (
         <p className="muted">No CV recorded as submitted for this application yet.</p>

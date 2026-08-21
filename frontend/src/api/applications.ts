@@ -3,9 +3,12 @@ import type {
   Application,
   ApplicationCreatePayload,
   ApplicationDetail,
+  ApplicationFolderExport,
   ApplicationPage,
   ApplicationUpdatePayload,
   AttachSubmittedCvPayload,
+  DuplicateCheckPayload,
+  DuplicateMatch,
   StatusChangePayload,
 } from './types'
 
@@ -65,4 +68,40 @@ export function attachSubmittedCv(
 
 export function deleteApplication(id: number): Promise<void> {
   return api.delete<void>(`/applications/${id}`)
+}
+
+/**
+ * Advisory-only: existing applications that may be the same posting. Never
+ * blocks creation — the caller decides what, if anything, to do with the result.
+ */
+export function checkForDuplicates(payload: DuplicateCheckPayload): Promise<DuplicateMatch[]> {
+  return api.post<DuplicateMatch[]>('/applications/duplicate-check', payload)
+}
+
+/**
+ * Prepare (or rebuild) the application's local folder with a copy of the
+ * submitted CV. A filesystem convenience — writes nothing to the database.
+ */
+export function exportApplicationFolder(id: number): Promise<ApplicationFolderExport> {
+  return api.post<ApplicationFolderExport>(`/applications/${id}/export-folder`)
+}
+
+/**
+ * Prepare the folder if needed, then open it in the OS file manager. The
+ * backend launches File Explorer (local single-user app).
+ */
+export function openApplicationFolder(id: number): Promise<ApplicationFolderExport> {
+  return api.post<ApplicationFolderExport>(`/applications/${id}/open-folder`)
+}
+
+/**
+ * Prepare and open a submission folder BEFORE the application is created, from a
+ * company/role and a selected CV document. Creates no application row.
+ */
+export function prepareDraftFolder(payload: {
+  company_name: string
+  role_title: string
+  document_id: number
+}): Promise<ApplicationFolderExport> {
+  return api.post<ApplicationFolderExport>('/applications/prepare-folder', payload)
 }

@@ -15,6 +15,12 @@ data/
 e2e-data/
 # Fictional documents written by the demo seed script
 demo-data/
+# Per-application CV export folders (APPLICATION_EXPORT_ROOT)
+application-exports/
+Jobs/
+
+# Gmail OAuth client secret and authorized token — never commit either
+secrets/
 
 # Playwright output
 playwright-report/

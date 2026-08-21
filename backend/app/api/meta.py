@@ -11,6 +11,7 @@ from app.enums import (
     ACTIVE_STATUSES,
     MANUAL_EVENT_TYPES,
     STAGE_ORDER,
+    STATUSES_REQUIRING_SUBMITTED_CV,
     TERMINAL_STATUSES,
     ApplicationChannel,
     ApplicationStatus,
@@ -31,6 +32,8 @@ def get_enums() -> dict[str, object]:
                 "is_active": member in ACTIVE_STATUSES,
                 # null for terminal statuses: an ending is not a stage.
                 "stage_order": STAGE_ORDER.get(member),
+                # True means moving to (or creating in) this status needs a CV.
+                "requires_submitted_cv": member in STATUSES_REQUIRING_SUBMITTED_CV,
             }
             for member in ApplicationStatus
         ],

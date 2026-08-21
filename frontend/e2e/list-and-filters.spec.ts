@@ -5,10 +5,12 @@ test.describe('list, search, filters and pagination', () => {
   test.beforeEach(() => resetDatabase())
 
   test('search and filters combine, and clear resets them', async ({ page, request }) => {
+    // `on_hold` rather than `applied`: a submitted-state status requires a
+    // submitted CV at creation, and this test is about filtering, not that rule.
     await createApplicationViaApi(request, {
       company_name: 'ProgrammaticX',
       role_title: 'Fullstack Developer',
-      status: 'applied',
+      status: 'on_hold',
       application_channel: 'linkedin',
     })
     await createApplicationViaApi(request, {
@@ -32,7 +34,7 @@ test.describe('list, search, filters and pagination', () => {
     await expect(page.locator('tbody tr')).toHaveCount(2)
 
     // Search + status together.
-    await page.getByLabel('Filter by status').selectOption('applied')
+    await page.getByLabel('Filter by status').selectOption('on_hold')
     await expect(page.locator('tbody tr')).toHaveCount(1)
     await expect(page.locator('tbody tr').first()).toContainText('Fullstack Developer')
 
@@ -113,7 +115,9 @@ test.describe('list, search, filters and pagination', () => {
       await createApplicationViaApi(request, {
         company_name: `Company ${String(index).padStart(2, '0')}`,
         role_title: 'Engineer',
-        status: index === 0 ? 'offer' : 'saved',
+        // `on_hold` rather than `offer`: a submitted-state status would require a
+        // submitted CV at creation, which is irrelevant to this pagination test.
+        status: index === 0 ? 'on_hold' : 'saved',
       })
     }
 
@@ -123,7 +127,7 @@ test.describe('list, search, filters and pagination', () => {
 
     // Without the page reset this would ask for page 2 of a 1-page result and
     // show an empty table.
-    await page.getByLabel('Filter by status').selectOption('offer')
+    await page.getByLabel('Filter by status').selectOption('on_hold')
 
     await expect(page.locator('tbody tr')).toHaveCount(1)
     await expect(page.getByText('Page 1 of')).toHaveCount(0)

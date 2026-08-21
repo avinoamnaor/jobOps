@@ -51,7 +51,7 @@ def safe_extension(original_filename: str | None) -> str:
     Returns "" (no extension) rather than raising, because the extension is a
     convenience for humans browsing the folder — it is never load-bearing.
 
-    >>> safe_extension("Avinoam_CV.PDF")
+    >>> safe_extension("Applicant_CV.PDF")
     '.pdf'
     >>> safe_extension("../../etc/passwd")
     ''
@@ -73,6 +73,40 @@ def safe_header_filename(original_filename: str | None, *, fallback: str) -> str
         return fallback
     cleaned = _UNSAFE_HEADER_CHARS.sub("", original_filename).strip()
     return cleaned or fallback
+
+
+# Characters Windows forbids in a file/folder name, plus control characters.
+_WINDOWS_INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WHITESPACE = re.compile(r"\s+")
+# Device names Windows reserves regardless of extension.
+_WINDOWS_RESERVED = {
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+
+
+def sanitize_windows_component(
+    name: str, *, fallback: str = "untitled", max_length: int = 120
+) -> str:
+    """Turn arbitrary text into one safe Windows path component (folder or file).
+
+    Replaces forbidden characters with a space, collapses whitespace, strips the
+    trailing dots/spaces Windows silently drops, guards reserved device names, and
+    bounds the length so the full path stays well clear of MAX_PATH. The result is
+    a single component — it can never contain a separator, so it cannot escape its
+    parent directory.
+    """
+    cleaned = _WINDOWS_INVALID_CHARS.sub(" ", name)
+    cleaned = _WHITESPACE.sub(" ", cleaned).strip().rstrip(". ").strip()
+    cleaned = cleaned[:max_length].rstrip(". ").strip()
+    if not cleaned:
+        return fallback
+    # A reserved name is compared without its extension, case-insensitively.
+    stem = cleaned.split(".", 1)[0].strip().lower()
+    if stem in _WINDOWS_RESERVED:
+        cleaned = f"_{cleaned}"
+    return cleaned
 
 
 class DocumentStorage:
