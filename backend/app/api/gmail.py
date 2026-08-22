@@ -47,6 +47,7 @@ def sync_gmail(
         fetched=result.fetched,
         imported=result.imported,
         already_existing=result.already_existing,
+        enriched=result.enriched,
     )
 
 

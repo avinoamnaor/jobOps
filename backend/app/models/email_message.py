@@ -9,10 +9,20 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Index, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+from app.enums import EmailDirection, sql_value_list
 
 
 class EmailMessage(Base):
@@ -36,12 +46,30 @@ class EmailMessage(Base):
     # raw MIME message, which nothing in this project has a use for.
     body_text: Mapped[str | None] = mapped_column(Text, default=None)
 
+    # Received or sent, read from Gmail's own `labelIds` (SENT/INBOX) — never
+    # guessed from the sender address, which would mean hardcoding a personal
+    # address. Rows imported before this column existed are `unknown`.
+    #
+    # Stored rather than derived because the raw `labelIds` are not kept: this
+    # is the one bit of that metadata later phases need, and re-fetching a
+    # message from Gmail just to learn its direction would make an offline
+    # question depend on the network.
+    direction: Mapped[str] = mapped_column(
+        String(20),
+        server_default=EmailDirection.UNKNOWN.value,
+        default=EmailDirection.UNKNOWN.value,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
     __table_args__ = (
         UniqueConstraint("gmail_message_id", name="uq_email_messages_gmail_message_id"),
+        CheckConstraint(
+            f"direction IN ({sql_value_list(EmailDirection)})",
+            name="ck_email_messages_direction",
+        ),
         Index("ix_email_messages_received_at", "received_at"),
     )
 

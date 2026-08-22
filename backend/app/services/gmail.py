@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.errors import EmailMessageNotFound, GmailSyncFailed
 from app.core.gmail_auth import load_credentials
-from app.core.gmail_parse import parse_gmail_message
+from app.core.gmail_parse import direction_from_labels, parse_gmail_message
+from app.enums import EmailDirection
 from app.models.email_message import EmailMessage
 
 
@@ -88,6 +89,10 @@ class GmailSyncResult:
     fetched: int
     imported: int
     already_existing: int
+    # Already-stored rows whose `direction` was filled in on this run. Counted
+    # separately from `imported` because no new row was created — without it,
+    # a sync that repaired 200 rows would report as doing nothing at all.
+    enriched: int = 0
 
 
 def sync_recent_messages(
@@ -116,13 +121,17 @@ def sync_recent_messages(
 
     imported = 0
     already_existing = 0
+    enriched = 0
 
     for message_id in message_ids:
-        exists = db.execute(
-            select(EmailMessage.id).where(EmailMessage.gmail_message_id == message_id)
+        existing = db.execute(
+            select(EmailMessage).where(EmailMessage.gmail_message_id == message_id)
         ).scalar_one_or_none()
-        if exists is not None:
+
+        if existing is not None:
             already_existing += 1
+            if _enrich_direction(db, existing, gmail):
+                enriched += 1
             continue
 
         raw_message = gmail.get_message(message_id)
@@ -136,7 +145,44 @@ def sync_recent_messages(
         fetched=len(message_ids),
         imported=imported,
         already_existing=already_existing,
+        enriched=enriched,
     )
+
+
+def _enrich_direction(db: Session, existing: EmailMessage, gmail: GmailMessages) -> bool:
+    """Fill in a stored message's `direction` if it is still unknown.
+
+    Rows imported before `direction` existed all read `unknown`, and plain
+    dedupe would leave them that way forever — the message is already stored, so
+    nothing would ever look at it again. This backfills them opportunistically:
+    whenever a later sync happens to see one of those messages again, it costs
+    one extra API call to learn what the migration could not.
+
+    Deliberately narrow, in three ways:
+
+      * Only `unknown` rows are touched. A row that already has a direction is
+        never re-fetched and never reassigned, so a known value cannot be
+        degraded — the row is not even a candidate.
+      * Only the `direction` column is written. Subject, body and timestamps are
+        left exactly as imported; this repairs metadata, it does not re-import
+        content.
+      * A re-fetch that yields no evidence changes nothing. `unknown` -> `unknown`
+        is not a write and is not counted, so a degenerate response cannot make
+        the row look freshly confirmed.
+
+    Returns True only when a value was actually written.
+    """
+    if existing.direction != EmailDirection.UNKNOWN.value:
+        return False
+
+    raw_message = gmail.get_message(existing.gmail_message_id)
+    direction = direction_from_labels(raw_message.get("labelIds"))
+    if direction == EmailDirection.UNKNOWN:
+        return False
+
+    existing.direction = direction.value
+    db.commit()
+    return True
 
 
 # --- Read-only inspection ---------------------------------------------------

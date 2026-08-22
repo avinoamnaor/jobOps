@@ -184,6 +184,165 @@ class SuggestionState(StrEnum):
     REJECTED = "rejected"
 
 
+class EmailDirection(StrEnum):
+    """Who authored a stored Gmail message: the account owner, or someone else.
+
+    Determined from Gmail's own `labelIds` metadata, never from the sender
+    address: parsing "is this me?" out of a `From:` header would mean hardcoding
+    a personal address into the codebase, and would break on aliases, plus
+    addressing, and display-name changes. `SENT` and `DRAFT` are system labels
+    Gmail applies itself, so they are authoritative and cost nothing to read.
+
+    OUTGOING means "the account owner wrote it" — sent mail *and* unsent drafts.
+    Slightly broader than the word suggests, and deliberately so: what the rest
+    of the system does with this field is decide whether the text is the user's
+    own words or an employer's, and an unsent draft is just as much the user's
+    own words as a sent reply.
+
+    INCOMING means "it arrived from someone else". Note this is NOT "it is in
+    the inbox": `INBOX` disappears the moment a message is archived, so keying
+    off it would misfile every archived recruitment email. See
+    `core.gmail_parse.direction_from_labels` for the full rule.
+
+    UNKNOWN is a real answer, not a failure — but a narrow one. It means no
+    label evidence at all, plus rows imported before this column existed. A
+    confident blank beats a confident wrong answer, the same principle the
+    capture extension uses.
+
+    Product policy this enables (Phase 6.2A/6.2B, deliberately not implemented
+    here): an `outgoing` message is never sent to the classifier and never
+    produces a suggestion by itself. A reply the user wrote is evidence about the
+    user, not about the employer's decision. Outgoing mail may later become
+    useful as *thread context*, but that is a separate phase.
+    """
+
+    INCOMING = "incoming"
+    OUTGOING = "outgoing"
+    UNKNOWN = "unknown"
+
+
+class EmailMessageType(StrEnum):
+    """What a recruitment email *means* — the classifier's semantic vocabulary.
+
+    This is an interpretation contract, not an action policy. A value here says
+    what the message is, never what JobOps should do about it: no status change,
+    no suggestion, no application match is implied by any member. Those are
+    deterministic product decisions made later, from this value plus context the
+    classifier never sees.
+
+    Ordering below is roughly "least to most engaged", which is a reading aid
+    only — nothing depends on member order.
+    """
+
+    # Not meaningfully related to a job or recruitment process at all.
+    IRRELEVANT = "irrelevant"
+
+    # Job recommendations or saved-search alerts. These often contain real
+    # company and role names, which makes them easy to mistake for evidence of
+    # an application — they are not. No application exists because of an alert.
+    JOB_ALERT = "job_alert"
+
+    # Confirmation that an application or submission was received.
+    APPLICATION_RECEIVED = "application_received"
+
+    # The candidate was referred or recommended by someone else, or another
+    # person submitted their details. Deliberately distinct from
+    # APPLICATION_RECEIVED: being referred does NOT mean the candidate
+    # personally applied, and later phases must not assume `applied` from it.
+    REFERRAL_OR_RECOMMENDATION = "referral_or_recommendation"
+
+    # A recruiter initiates meaningful contact about a role but has not yet
+    # asked to arrange a call. The distinction from INTERVIEW_INVITATION is the
+    # ask: "we have a role that fits you" is outreach; "when are you free?" is
+    # an invitation.
+    RECRUITER_OUTREACH = "recruiter_outreach"
+
+    # The company asks the candidate to arrange, or to supply availability for,
+    # a call or interview — but no final date/time is settled yet.
+    INTERVIEW_INVITATION = "interview_invitation"
+
+    # A concrete interview/call date and time is established. This is the only
+    # type that routinely justifies a non-null `event_datetime`.
+    INTERVIEW_SCHEDULED = "interview_scheduled"
+
+    # A candidate action is requested: technical questions, take-home task,
+    # coding assessment, screening form, or similar.
+    ASSESSMENT_REQUESTED = "assessment_requested"
+
+    # Recruitment-process information that fits no more specific type above.
+    # A fallback, NOT a catch-all: if the message actually schedules an
+    # interview or rejects the candidate, it is that type, not this one.
+    PROCESS_UPDATE = "process_update"
+
+    # The company communicates that the candidacy will not continue.
+    #
+    # Subject lines mislead here more than anywhere else: "Thank you for
+    # applying" and "Update on your application" are both common rejection
+    # subjects. Classification must read the body, never the subject alone.
+    REJECTION = "rejection"
+
+    # An actual job offer is communicated — not generic positive progress, and
+    # not "we would like to move you to the next round".
+    OFFER_RECEIVED = "offer_received"
+
+    # GDPR/privacy/data-retention consent or similar administrative notices,
+    # typically automated from an ATS.
+    PRIVACY_OR_RETENTION_NOTICE = "privacy_or_retention_notice"
+
+    # A request to rate or give feedback about an interview experience. Often
+    # evidence that an interview happened, but semantically distinct from the
+    # interview itself — kept separate so later phases can decide what, if
+    # anything, to infer from it.
+    POST_INTERVIEW_SURVEY = "post_interview_survey"
+
+    # Clearly recruitment-related, but none of the specific types above.
+    OTHER_RECRUITMENT = "other_recruitment"
+
+
+class ClassificationConfidence(StrEnum):
+    """How sure the classifier is about its interpretation.
+
+    Coarse buckets on purpose. An LLM's numeric self-reported probability
+    ("0.97") is not calibrated and reads as far more precise than it is; three
+    named levels are honest about what the signal actually supports.
+
+    Deliberately NOT `SuggestionConfidence`, despite sharing values today. That
+    enum describes how sure the producer of a *status proposal* is; this one
+    describes certainty about a *semantic reading* of an email. Keeping them
+    apart is what lets classification stay independent of suggestion policy —
+    the entire point of splitting these phases — and lets either vocabulary
+    change without dragging the other with it.
+    """
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+# Message types that are recruitment-related. Derived from the enum rather than
+# stored as a separate `recruitment_related` field on the classifier's output:
+# two fields that can contradict each other is a bug waiting to happen, so
+# `message_type` stays the single source of truth and this is computed from it.
+RECRUITMENT_MESSAGE_TYPES: frozenset[EmailMessageType] = frozenset(EmailMessageType) - frozenset(
+    {EmailMessageType.IRRELEVANT}
+)
+
+# Directions whose messages are eligible to be classified at all.
+#
+# Policy captured here, enforced in a later phase: outgoing mail is the user's
+# own writing (sent or drafted), so classifying it would produce statements
+# about the user's intent dressed up as statements about an employer's decision.
+#
+# `unknown` is included, which is safe because of how narrow it now is: every
+# message the account owner authored carries SENT or DRAFT, so `unknown` cannot
+# be the user's own writing — it is only a message with no label evidence at
+# all, which in practice means a degenerate API response rather than anything
+# the user wrote.
+CLASSIFIABLE_EMAIL_DIRECTIONS: frozenset[EmailDirection] = frozenset(
+    {EmailDirection.INCOMING, EmailDirection.UNKNOWN}
+)
+
+
 def sql_value_list(enum_cls: type[StrEnum]) -> str:
     """Render an enum as a SQL literal list, for CHECK constraints."""
     return ", ".join(f"'{member.value}'" for member in enum_cls)

@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from app.enums import EmailDirection
+
 
 class GmailSyncResponse(BaseModel):
     """Result of one sync call: what was looked at, and how it was handled."""
@@ -11,6 +13,11 @@ class GmailSyncResponse(BaseModel):
     fetched: int
     imported: int
     already_existing: int
+    # A subset of `already_existing`: rows that were already stored but had no
+    # direction recorded, and gained one on this run. Reported separately
+    # because no new message was created — otherwise a sync that repaired
+    # hundreds of rows would look identical to one that did nothing.
+    enriched: int
 
 
 class EmailMessageSummary(BaseModel):
@@ -25,6 +32,11 @@ class EmailMessageSummary(BaseModel):
     subject: str | None
     received_at: datetime
     created_at: datetime
+    # Read from Gmail's own SENT/INBOX labels at import time, never guessed from
+    # the sender address. Included in the summary rather than only the detail:
+    # it is one short word, and "which of these did I send?" is exactly the kind
+    # of question a list view should answer without opening every row.
+    direction: EmailDirection
 
 
 class EmailMessageDetail(EmailMessageSummary):

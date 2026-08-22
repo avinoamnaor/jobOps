@@ -11,6 +11,7 @@ all — proven with a `_ForbiddenClient` that fails the test if it is ever touch
 import base64
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -32,6 +33,7 @@ def _raw_message(message_id: str) -> dict:
         "threadId": f"thread-{message_id}",
         "internalDate": "1767225600000",
         "snippet": "preview",
+        "labelIds": ["INBOX"],
         "payload": {
             "headers": [
                 {"name": "From", "value": "a@example.com"},
@@ -87,6 +89,7 @@ def _store_message(
     subject: str = "Subject",
     sender: str = "a@example.com",
     body_text: str | None = "body",
+    direction: str = "incoming",
 ) -> EmailMessage:
     """Insert a row directly — these endpoints only ever read the database, so
     tests seed it the same way, with full control over `received_at` for
@@ -98,6 +101,7 @@ def _store_message(
         subject=subject,
         received_at=received_at,
         body_text=body_text,
+        direction=direction,
     )
     db.add(message)
     db.commit()
@@ -112,7 +116,12 @@ class TestSyncEndpoint:
         response = client.post("/integrations/gmail/sync")
 
         assert response.status_code == 200, response.text
-        assert response.json() == {"fetched": 1, "imported": 1, "already_existing": 0}
+        assert response.json() == {
+            "fetched": 1,
+            "imported": 1,
+            "already_existing": 0,
+            "enriched": 0,
+        }
 
     def test_second_sync_reports_already_existing(self, client: TestClient, monkeypatch) -> None:
         monkeypatch.setattr(gmail_api, "GmailClient", _FakeConnectedClient)
@@ -120,7 +129,12 @@ class TestSyncEndpoint:
         client.post("/integrations/gmail/sync")
         response = client.post("/integrations/gmail/sync")
 
-        assert response.json() == {"fetched": 1, "imported": 0, "already_existing": 1}
+        assert response.json() == {
+            "fetched": 1,
+            "imported": 0,
+            "already_existing": 1,
+            "enriched": 0,
+        }
 
     def test_window_and_max_messages_query_params_are_accepted(
         self, client: TestClient, monkeypatch
@@ -240,6 +254,7 @@ class TestListMessagesEndpoint:
             "subject",
             "received_at",
             "created_at",
+            "direction",
         }
 
     def test_empty_list_when_nothing_imported(self, client: TestClient) -> None:
@@ -317,3 +332,175 @@ class TestStatusEndpoint:
         # Three short booleans is the whole payload — nowhere near enough room
         # to be hiding an actual token or client secret.
         assert len(response.content) < 120
+
+
+class TestDirectionThroughTheInspectionApi:
+    """Direction is exposed on both list and detail, as its enum value."""
+
+    def test_list_exposes_direction(self, client: TestClient, db_session: Session) -> None:
+        _store_message(
+            db_session,
+            gmail_message_id="m1",
+            received_at=datetime.now(UTC),
+            direction="outgoing",
+        )
+
+        response = client.get("/integrations/gmail/messages")
+
+        assert response.json()["items"][0]["direction"] == "outgoing"
+
+    def test_detail_exposes_direction(self, client: TestClient, db_session: Session) -> None:
+        message = _store_message(
+            db_session,
+            gmail_message_id="m1",
+            received_at=datetime.now(UTC),
+            direction="incoming",
+        )
+
+        response = client.get(f"/integrations/gmail/messages/{message.id}")
+
+        assert response.json()["direction"] == "incoming"
+
+    def test_all_three_directions_serialize(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        now = datetime.now(UTC)
+        for index, direction in enumerate(("incoming", "outgoing", "unknown")):
+            _store_message(
+                db_session,
+                gmail_message_id=f"m{index}",
+                received_at=now - timedelta(minutes=index),
+                direction=direction,
+            )
+
+        response = client.get("/integrations/gmail/messages")
+
+        assert [item["direction"] for item in response.json()["items"]] == [
+            "incoming",
+            "outgoing",
+            "unknown",
+        ]
+
+    def test_synced_message_direction_reaches_the_api(
+        self, client: TestClient, monkeypatch
+    ) -> None:
+        """End to end: Gmail labels -> parse -> store -> HTTP response."""
+        monkeypatch.setattr(gmail_api, "GmailClient", _FakeConnectedClient)
+
+        client.post("/integrations/gmail/sync")
+        response = client.get("/integrations/gmail/messages")
+
+        # _raw_message carries labelIds ["INBOX"].
+        assert response.json()["items"][0]["direction"] == "incoming"
+
+    def test_rows_predating_the_column_read_as_unknown(
+        self, client: TestClient, db_session: Session
+    ) -> None:
+        """The migration's server default, observed through the API.
+
+        An INSERT that omits `direction` — which is what every row imported
+        before this column existed effectively was — surfaces as `unknown`
+        rather than failing or reading as a guess.
+        """
+        from sqlalchemy import text
+
+        db_session.execute(
+            text(
+                "INSERT INTO email_messages "
+                "(gmail_message_id, thread_id, sender, subject, received_at, body_text) "
+                "VALUES ('legacy', 'thread-legacy', 'a@example.com', 'Old', now(), 'body')"
+            )
+        )
+        db_session.commit()
+
+        response = client.get("/integrations/gmail/messages")
+
+        assert response.json()["items"][0]["direction"] == "unknown"
+
+    def test_an_invalid_direction_is_rejected_by_the_database(
+        self, db_session: Session
+    ) -> None:
+        """The CHECK constraint is a real guarantee, not just a Python enum."""
+        from sqlalchemy import text
+        from sqlalchemy.exc import IntegrityError
+
+        with pytest.raises(IntegrityError):
+            db_session.execute(
+                text(
+                    "INSERT INTO email_messages "
+                    "(gmail_message_id, thread_id, sender, received_at, direction) "
+                    "VALUES ('bad', 'thread-bad', 'a@example.com', now(), 'sideways')"
+                )
+            )
+            db_session.commit()
+        db_session.rollback()
+
+
+class TestEnrichmentThroughTheApi:
+    """The repair path for rows imported before `direction` existed.
+
+    Modelled on the real situation: messages already in the database, all
+    reading `unknown`, which plain dedupe would never revisit.
+    """
+
+    def test_sync_reports_and_performs_enrichment(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(gmail_api, "GmailClient", _FakeConnectedClient)
+        # Same gmail_message_id the fake client serves, stored the way the
+        # migration left every pre-existing row.
+        stored = _store_message(
+            db_session,
+            gmail_message_id="m1",
+            received_at=datetime.now(UTC),
+            direction="unknown",
+        )
+
+        response = client.post("/integrations/gmail/sync")
+
+        assert response.json() == {
+            "fetched": 1,
+            "imported": 0,
+            "already_existing": 1,
+            "enriched": 1,
+        }
+        db_session.refresh(stored)
+        assert stored.direction == "incoming"
+
+    def test_enriched_direction_is_visible_in_the_inspection_api(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(gmail_api, "GmailClient", _FakeConnectedClient)
+        _store_message(
+            db_session,
+            gmail_message_id="m1",
+            received_at=datetime.now(UTC),
+            direction="unknown",
+        )
+
+        assert client.get("/integrations/gmail/messages").json()["items"][0][
+            "direction"
+        ] == "unknown"
+
+        client.post("/integrations/gmail/sync")
+
+        assert client.get("/integrations/gmail/messages").json()["items"][0][
+            "direction"
+        ] == "incoming"
+
+    def test_a_steady_state_sync_reports_no_enrichment(
+        self, client: TestClient, db_session: Session, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(gmail_api, "GmailClient", _FakeConnectedClient)
+        _store_message(
+            db_session,
+            gmail_message_id="m1",
+            received_at=datetime.now(UTC),
+            direction="unknown",
+        )
+
+        client.post("/integrations/gmail/sync")
+        second = client.post("/integrations/gmail/sync")
+
+        assert second.json()["enriched"] == 0
+        assert second.json()["already_existing"] == 1
