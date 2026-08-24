@@ -18,6 +18,10 @@ dependencies = [
     "google-api-python-client>=2.100",
     "google-auth-oauthlib>=1.2",
     "google-auth-httplib2>=0.2",
+    # Email classification (Phase 6.2A-1). Both are imported lazily, in exactly
+    # one module, so the unit suite runs without either installed.
+    "openai>=1.40",
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]

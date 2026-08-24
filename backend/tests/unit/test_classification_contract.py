@@ -271,13 +271,19 @@ class TestOutgoingMailIsNotClassifiable:
         assert EmailDirection.UNKNOWN in CLASSIFIABLE_EMAIL_DIRECTIONS
 
 
-class TestNoLlmIntegrationExistsYet:
-    def test_no_openai_client_is_wired_into_the_backend(self) -> None:
-        """This slice specifies a contract; it must not have connected a model.
+class TestLlmIntegrationStaysBehindItsBoundary:
+    """The provider is confined to one module, and imported lazily there.
 
-        Guards the scope boundary mechanically, so "we only added a tiny call"
-        cannot slip in unnoticed alongside contract work.
-        """
+    This replaces an earlier guard that forbade any OpenAI import at all, which
+    was correct while the contract had no implementation. Now that Phase 6.2A-1
+    has connected one, the property worth protecting is different: the rest of
+    JobOps must never depend on provider types, and importing app code must
+    never require the SDK to be installed.
+    """
+
+    ALLOWED_MODULE = "services/email_classifier.py"
+
+    def _llm_importers(self) -> dict[str, list]:
         import ast
         from pathlib import Path
 
@@ -285,11 +291,10 @@ class TestNoLlmIntegrationExistsYet:
 
         app_root = Path(app.__file__).parent
         llm_packages = {"openai", "anthropic"}
-        offenders: list[str] = []
+        found: dict[str, list] = {}
 
-        # Parsed, not grepped: prose in a docstring explaining that no client is
-        # wired up yet must not count as wiring one up. Only real import
-        # statements do.
+        # Parsed, not grepped: prose in a docstring mentioning a provider must
+        # not count as importing one. Only real import statements do.
         for path in app_root.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
@@ -300,10 +305,56 @@ class TestNoLlmIntegrationExistsYet:
                 else:
                     continue
                 if names & llm_packages:
-                    offenders.append(path.relative_to(app_root).as_posix())
-                    break
+                    found.setdefault(path.relative_to(app_root).as_posix(), []).append(node)
+        return found
 
-        assert offenders == [], f"unexpected LLM client import in: {offenders}"
+    def test_only_the_classifier_module_imports_a_provider_sdk(self) -> None:
+        assert set(self._llm_importers()) <= {self.ALLOWED_MODULE}
+
+    def test_the_provider_import_is_lazy(self) -> None:
+        """Importing app code must not require the SDK to be installed.
+
+        A module-level `import openai` would make every test, every migration
+        and the whole API depend on a package only one code path needs -- and
+        would break the unit suite on a machine that has never configured a key.
+        """
+        import ast
+        from pathlib import Path
+
+        import app
+
+        source = (Path(app.__file__).parent / self.ALLOWED_MODULE).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        module_level = {
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+        } - {
+            node
+            for parent in ast.walk(tree)
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for node in ast.walk(parent)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+        }
+
+        offenders = [
+            node
+            for node in module_level
+            if (
+                {alias.name.split(".")[0] for alias in node.names}
+                if isinstance(node, ast.Import)
+                else {(node.module or "").split(".")[0]}
+            )
+            & {"openai", "anthropic"}
+        ]
+        assert offenders == [], "the provider SDK must be imported inside a function"
+
+    def test_importing_the_classifier_does_not_require_the_sdk(self) -> None:
+        # The practical consequence of the rule above, asserted directly.
+        import importlib
+
+        assert importlib.import_module("app.services.email_classifier") is not None
 
 
 class TestEvidenceIsRequiredForSubstantiveVerdicts:

@@ -189,6 +189,79 @@ class EmailMessageNotFound(JobOpsError):
         self.message_id = message_id
 
 
+class EmailClassifierNotConfigured(JobOpsError):
+    """No API key is configured for the selected email-classifier provider.
+
+    Deliberately parallel to `GmailNotConnected`: a setup problem, not a
+    provider failure, so the message points at the fix rather than at a cause.
+
+    Names the provider and the variable to set, because with more than one
+    provider available "the classifier is not configured" is no longer enough
+    to act on — the likeliest cause is switching provider and forgetting the
+    matching key. Never includes the key, the configured value, or any part of
+    one.
+    """
+
+    def __init__(self, provider: str, env_var: str) -> None:
+        super().__init__(
+            f"The email classifier is not configured for provider '{provider}'. "
+            f"Set {env_var} in your local .env (it is gitignored) and restart "
+            "the process, then try again."
+        )
+        self.provider = provider
+        self.env_var = env_var
+
+
+class EmailClassificationFailed(JobOpsError):
+    """The classification request itself failed.
+
+    Covers everything that can go wrong on the provider side — network error,
+    timeout, rate limit, refusal, truncated response, a reply that does not
+    satisfy the schema. One domain error type for all of it, so callers never
+    see a raw SDK exception and never need the SDK installed to catch it.
+
+    Distinct from a semantic `irrelevant` verdict: this means we do not know
+    what the message is, not that we decided it is nothing.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"Email classification failed: {detail}")
+        self.detail = detail
+
+
+class EmailClassificationNotGrounded(JobOpsError):
+    """The model returned evidence that does not appear in the source message.
+
+    A schema-valid response is not automatically a trustworthy one. Fabricated
+    support is worse than none, because it reads as corroboration — so the
+    classification is rejected outright rather than quietly stripped of its bad
+    excerpts and returned as if it had been verified.
+    """
+
+    def __init__(self, excerpts: list[str]) -> None:
+        joined = "; ".join(repr(excerpt) for excerpt in excerpts)
+        super().__init__(
+            f"Email classification rejected: {len(excerpts)} evidence excerpt(s) "
+            f"do not appear in the source message: {joined}"
+        )
+        self.excerpts = excerpts
+
+
+class OutgoingMessageNotClassifiable(JobOpsError):
+    """Classification was attempted on a message the account owner wrote.
+
+    Outgoing mail is excluded by policy (see `EmailDirection`): the user's own
+    words are evidence about the user, not about an employer's decision. Raised
+    before any API call, so a mistake here costs nothing.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Outgoing messages are not classified: the text is the account "
+            "owner's own writing, not an employer's statement."
+        )
+
+
 class SuggestionNotFound(JobOpsError):
     def __init__(self, suggestion_id: int) -> None:
         super().__init__(f"Suggestion {suggestion_id} does not exist")

@@ -11,9 +11,24 @@ Why pydantic-settings rather than plain `os.getenv`:
 """
 
 import os
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class EmailClassifierProvider(StrEnum):
+    """Which LLM provider classifies emails.
+
+    Infrastructure vocabulary, so it lives here rather than in `app/enums.py` —
+    that module is the domain's own language, all of it persisted in PostgreSQL
+    behind CHECK constraints. A provider is never stored in a row; it is a
+    deployment choice, and typing the setting with an enum means a typo in
+    `.env` fails loudly at startup instead of at the first classification.
+    """
+
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
 
 # This file lives at <repo>/backend/app/config.py, so:
 #   parents[0] = app, parents[1] = backend, parents[2] = repository root
@@ -86,6 +101,47 @@ class Settings(BaseSettings):
     # phase is a foundation, not a full inbox import.
     gmail_sync_window_days: int = 30
     gmail_max_messages_per_sync: int = 200
+
+    # --- Email classification (Phase 6.2A-1) ------------------------------
+    # Which provider to use. The classifier itself is provider-neutral; this
+    # selects only which transport is built, so switching is a config change.
+    email_classifier_provider: EmailClassifierProvider = EmailClassifierProvider.OPENAI
+
+    # API keys are read from the environment like every other setting, and are
+    # never logged, echoed, or included in an error message. No default: absent
+    # means "not configured", which the classifier reports as a setup problem
+    # rather than a failure. Only the selected provider's key is ever required.
+    openai_api_key: str | None = None
+    anthropic_api_key: str | None = None
+
+    # Which model classifies emails. Configuration, not code: nothing
+    # downstream branches on this value.
+    #
+    # `None` means "use the selected provider's default" (see
+    # `services.email_classifier.DEFAULT_MODELS`). That default matters: a
+    # single pinned model string would silently be sent to the *other* provider
+    # the moment someone flipped the provider setting, which fails confusingly
+    # rather than obviously.
+    email_classifier_model: str | None = None
+
+    # Ceiling on one reply. Required by Anthropic's Messages API; the OpenAI
+    # Responses path does not use it.
+    #
+    # Deliberately generous for a payload this small. On models where thinking
+    # is on by default, reasoning tokens count against this same ceiling, so a
+    # classification-sized cap (a few hundred) would truncate the answer and
+    # surface as a failure rather than as the cost saving it looks like.
+    email_classifier_max_output_tokens: int = 4_096
+
+    # Bounds one request's cost. Recruitment emails are far shorter than this;
+    # the cap exists for the occasional quoted thread. Applied on top of
+    # `gmail_parse.MAX_BODY_TEXT_LENGTH`, which already bounds what is stored.
+    email_classifier_max_body_chars: int = 8_000
+
+    # Seconds before a classification request is abandoned. Deliberately short:
+    # this is a bounded text classification, and a slow response is far more
+    # likely to be a stuck connection than a thoughtful answer.
+    email_classifier_timeout_seconds: float = 60.0
 
     # --- Frontend --------------------------------------------------------
     # Kept as a plain comma-separated string rather than `list[str]`.
