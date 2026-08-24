@@ -16,8 +16,18 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.errors import EmailMessageNotFound, GmailSyncFailed
 from app.core.gmail_auth import load_credentials
-from app.core.gmail_parse import direction_from_labels, parse_gmail_message
-from app.enums import EmailDirection
+from app.core.gmail_parse import (
+    MAX_BODY_TEXT_LENGTH,
+    direction_from_labels,
+    extract_body,
+    parse_gmail_message,
+)
+from app.enums import (
+    BODY_SOURCE_QUALITY,
+    UPGRADABLE_BODY_SOURCES,
+    EmailBodySource,
+    EmailDirection,
+)
 from app.models.email_message import EmailMessage
 
 
@@ -89,9 +99,10 @@ class GmailSyncResult:
     fetched: int
     imported: int
     already_existing: int
-    # Already-stored rows whose `direction` was filled in on this run. Counted
-    # separately from `imported` because no new row was created — without it,
-    # a sync that repaired 200 rows would report as doing nothing at all.
+    # Already-stored rows improved on this run — a direction filled in, a Gmail
+    # preview replaced by the real body, or both. Counted separately from
+    # `imported` because no new row was created; without it, a sync that
+    # repaired hundreds of rows would report as doing nothing at all.
     enriched: int = 0
 
 
@@ -130,7 +141,7 @@ def sync_recent_messages(
 
         if existing is not None:
             already_existing += 1
-            if _enrich_direction(db, existing, gmail):
+            if _enrich_existing(db, existing, gmail):
                 enriched += 1
             continue
 
@@ -149,40 +160,102 @@ def sync_recent_messages(
     )
 
 
-def _enrich_direction(db: Session, existing: EmailMessage, gmail: GmailMessages) -> bool:
-    """Fill in a stored message's `direction` if it is still unknown.
+def _needs_enrichment(existing: EmailMessage) -> bool:
+    """Whether re-fetching this stored message could improve it.
 
-    Rows imported before `direction` existed all read `unknown`, and plain
-    dedupe would leave them that way forever — the message is already stored, so
-    nothing would ever look at it again. This backfills them opportunistically:
-    whenever a later sync happens to see one of those messages again, it costs
-    one extra API call to learn what the migration could not.
-
-    Deliberately narrow, in three ways:
-
-      * Only `unknown` rows are touched. A row that already has a direction is
-        never re-fetched and never reassigned, so a known value cannot be
-        degraded — the row is not even a candidate.
-      * Only the `direction` column is written. Subject, body and timestamps are
-        left exactly as imported; this repairs metadata, it does not re-import
-        content.
-      * A re-fetch that yields no evidence changes nothing. `unknown` -> `unknown`
-        is not a write and is not counted, so a degenerate response cannot make
-        the row look freshly confirmed.
-
-    Returns True only when a value was actually written.
+    Two independent gaps qualify: a direction that was never determined, and a
+    body that is a Gmail preview (or was recorded before sources were tracked).
+    Checked before any API call, so a row with nothing to gain costs nothing.
     """
-    if existing.direction != EmailDirection.UNKNOWN.value:
+    if existing.direction == EmailDirection.UNKNOWN.value:
+        return True
+    return EmailBodySource(existing.body_source) in UPGRADABLE_BODY_SOURCES
+
+
+def _enrich_existing(db: Session, existing: EmailMessage, gmail: GmailMessages) -> bool:
+    """Improve a stored message in place, using one re-fetch for both gaps.
+
+    Enrichment exists because plain dedupe leaves early rows permanently worse
+    than later ones: the message is already stored, so nothing looks at it
+    again. This backfills opportunistically — when a later sync happens to see
+    the message, it costs one API call to learn what the original import could
+    not.
+
+    Deliberately narrow, in the same three ways as before:
+
+      * Only rows with something to gain are fetched (see `_needs_enrichment`).
+      * Only the fields that improved are written.
+      * A re-fetch that yields nothing better changes nothing and is not
+        counted, so a degenerate response cannot make a row look freshly
+        confirmed.
+
+    Returns True only when something was actually written.
+    """
+    if not _needs_enrichment(existing):
         return False
 
     raw_message = gmail.get_message(existing.gmail_message_id)
-    direction = direction_from_labels(raw_message.get("labelIds"))
-    if direction == EmailDirection.UNKNOWN:
-        return False
+    changed = False
 
-    existing.direction = direction.value
-    db.commit()
-    return True
+    if existing.direction == EmailDirection.UNKNOWN.value:
+        direction = direction_from_labels(raw_message.get("labelIds"))
+        if direction != EmailDirection.UNKNOWN:
+            existing.direction = direction.value
+            changed = True
+
+    if EmailBodySource(existing.body_source) in UPGRADABLE_BODY_SOURCES:
+        changed = _upgrade_body(existing, raw_message) or changed
+
+    if changed:
+        db.commit()
+    return changed
+
+
+def _upgrade_body(existing: EmailMessage, raw_message: dict) -> bool:
+    """Improve what is known about a stored body — content or provenance.
+
+    Two distinct improvements, deliberately kept apart because they mean
+    different things:
+
+    **Content upgrade.** A strictly better source replaces the body outright:
+    `plain` beats `html` beats `snippet`, and `unknown` ranks lowest so any
+    determined source improves on "never recorded". The comparison is on
+    *source*, not length — a longer body is not necessarily a better one, and an
+    HTML conversion that swept up a footer should not displace the plain part it
+    was rendered from.
+
+    **Provenance upgrade.** `unknown` and `none` both rank zero, so the quality
+    test alone can never move between them — yet they are not the same claim.
+    `unknown` means nobody has looked; `none` means we looked and this message
+    genuinely carries no usable body or snippet. Recording that is a real gain
+    in knowledge even though not a byte of text changes.
+
+    That second case writes `body_source` and nothing else, and only when the
+    row has no text to contradict it. A row that visibly holds content is never
+    relabelled "no body" — the label would be false, and a stored body is
+    evidence that outranks a fresh parse disagreeing with it.
+    """
+    body_text, body_source = extract_body(raw_message)
+    if body_text and len(body_text) > MAX_BODY_TEXT_LENGTH:
+        body_text = body_text[:MAX_BODY_TEXT_LENGTH]
+
+    stored = EmailBodySource(existing.body_source)
+
+    if BODY_SOURCE_QUALITY[body_source] > BODY_SOURCE_QUALITY[stored]:
+        existing.body_text = body_text
+        existing.body_source = body_source.value
+        return True
+
+    if (
+        stored is EmailBodySource.UNKNOWN
+        and body_source is EmailBodySource.NONE
+        and not (existing.body_text or "").strip()
+    ):
+        # Metadata only. No text is written, invented, or cleared.
+        existing.body_source = EmailBodySource.NONE.value
+        return True
+
+    return False
 
 
 # --- Read-only inspection ---------------------------------------------------

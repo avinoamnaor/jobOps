@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import EmailClassifierProvider, settings  # noqa: E402
 from app.core.classification_evidence import unverifiable_evidence  # noqa: E402
-from app.core.errors import JobOpsError  # noqa: E402
+from app.core.errors import JobOpsError, OutgoingMessageNotClassifiable  # noqa: E402
 from app.schemas.classification import EmailClassification  # noqa: E402
 from app.services.email_classifier import (  # noqa: E402
     PROVIDER_KEY_VARIABLES,
@@ -50,9 +50,21 @@ class CaseOutcome:
     grounded: bool | None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    skipped: bool = False
+    """Excluded from classification by policy before any request was made.
+
+    Today that means one thing: an outgoing message, which the classifier
+    refuses by design. Counting that refusal as a failure was actively
+    misleading — it made a correct, deliberate exclusion look like a defect and
+    put a ceiling of 18/19 on a classifier that got everything it was asked to
+    classify right. A skip is neither a success nor a failure; it is a case that
+    was never in scope, so it leaves the accuracy denominator entirely.
+    """
 
     @property
     def type_matches(self) -> bool:
+        if self.skipped:
+            return False
         return (
             self.predicted is not None
             and self.predicted.message_type == self.case.expected.message_type
@@ -60,12 +72,13 @@ class CaseOutcome:
 
     @property
     def failed(self) -> bool:
-        """A classification that never produced a verdict.
+        """A classification that was attempted and produced no verdict.
 
         Kept separate from a wrong verdict throughout: not knowing and being
-        mistaken are different problems with different fixes.
+        mistaken are different problems with different fixes. A skip is neither
+        — nothing was attempted.
         """
-        return self.predicted is None
+        return self.predicted is None and not self.skipped
 
 
 def _fmt(value: object, width: int = 28) -> str:
@@ -90,6 +103,12 @@ def run_case(classifier: StructuredEmailClassifier, case: EvalCase) -> CaseOutco
     )
     try:
         predicted = classifier.classify(message)
+    except OutgoingMessageNotClassifiable as exc:
+        # The classifier working correctly, not failing. Recorded as a skip so
+        # it stays visible in the per-case output without distorting the score.
+        return CaseOutcome(
+            case=case, predicted=None, error=str(exc), grounded=None, skipped=True
+        )
     except JobOpsError as exc:
         # Domain errors only. An unexpected exception is a bug in this script
         # and should surface as a traceback rather than a tidy row.
@@ -115,7 +134,10 @@ def print_case_row(outcome: CaseOutcome) -> None:
     case = outcome.case
     expected = case.expected
 
-    if outcome.failed:
+    if outcome.skipped:
+        verdict = "SKIP"
+        predicted_type = "(not classified)"
+    elif outcome.failed:
         verdict = "ERROR"
         predicted_type = "-"
     else:
@@ -124,6 +146,11 @@ def print_case_row(outcome: CaseOutcome) -> None:
 
     print(f"  {verdict:<5} {case.name}")
     print(f"        type      expected={expected.message_type.value:<28} got={predicted_type}")
+
+    if outcome.skipped:
+        print("        reason    excluded by policy before any request (outgoing)")
+        print()
+        return
 
     if outcome.failed:
         print(f"        error     {outcome.error}")
@@ -159,11 +186,16 @@ def print_case_row(outcome: CaseOutcome) -> None:
 
 
 def print_summary(outcomes: list[CaseOutcome]) -> None:
-    total = len(outcomes)
-    answered = [o for o in outcomes if not o.failed]
+    skipped = [o for o in outcomes if o.skipped]
+    # The denominator is what the classifier was actually asked to do. A case
+    # excluded by policy before any request was never in scope, so counting it
+    # would measure the exclusion rather than the classifier.
+    classifiable = [o for o in outcomes if not o.skipped]
+    total = len(classifiable)
+    answered = [o for o in classifiable if not o.failed]
 
-    type_correct = sum(1 for o in outcomes if o.type_matches)
-    failures = sum(1 for o in outcomes if o.failed)
+    type_correct = sum(1 for o in classifiable if o.type_matches)
+    failures = sum(1 for o in classifiable if o.failed)
     grounded = sum(1 for o in answered if o.grounded)
 
     company_correct = sum(
@@ -182,6 +214,9 @@ def print_summary(outcomes: list[CaseOutcome]) -> None:
     print("=" * 72)
     print("AGGREGATE")
     print("=" * 72)
+    print(f"  classifiable cases         {total} of {len(outcomes)}")
+    if skipped:
+        print(f"  skipped by policy          {len(skipped)} (outgoing — never sent)")
     print(f"  message-type accuracy      {pct(type_correct, total)}")
     print(f"  classification failures    {failures}")
     print(f"  evidence-grounding rate    {pct(grounded, len(answered))}")
@@ -197,7 +232,7 @@ def print_summary(outcomes: list[CaseOutcome]) -> None:
             f"{input_tokens} in / {output_tokens} out tokens"
         )
 
-    mismatched = [o for o in outcomes if not o.type_matches]
+    mismatched = [o for o in classifiable if not o.type_matches]
     if not mismatched:
         print()
         print("  No mismatches.")

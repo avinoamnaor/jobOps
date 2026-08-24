@@ -255,6 +255,7 @@ class TestListMessagesEndpoint:
             "received_at",
             "created_at",
             "direction",
+            "body_source",
         }
 
     def test_empty_list_when_nothing_imported(self, client: TestClient) -> None:

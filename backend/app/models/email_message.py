@@ -22,7 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.enums import EmailDirection, sql_value_list
+from app.enums import EmailBodySource, EmailDirection, sql_value_list
 
 
 class EmailMessage(Base):
@@ -45,6 +45,16 @@ class EmailMessage(Base):
     # Decoded plain-text body, or Gmail's own snippet as a fallback — never the
     # raw MIME message, which nothing in this project has a use for.
     body_text: Mapped[str | None] = mapped_column(Text, default=None)
+
+    # Which MIME part `body_text` came from. Recorded because a Gmail snippet
+    # and a genuinely short email are indistinguishable once stored, so without
+    # it there is no safe way to tell which rows are previews worth improving.
+    # Rows imported before this column existed read `unknown`.
+    body_source: Mapped[str] = mapped_column(
+        String(20),
+        server_default=EmailBodySource.UNKNOWN.value,
+        default=EmailBodySource.UNKNOWN.value,
+    )
 
     # Received or sent, read from Gmail's own `labelIds` (SENT/INBOX) — never
     # guessed from the sender address, which would mean hardcoding a personal
@@ -69,6 +79,10 @@ class EmailMessage(Base):
         CheckConstraint(
             f"direction IN ({sql_value_list(EmailDirection)})",
             name="ck_email_messages_direction",
+        ),
+        CheckConstraint(
+            f"body_source IN ({sql_value_list(EmailBodySource)})",
+            name="ck_email_messages_body_source",
         ),
         Index("ix_email_messages_received_at", "received_at"),
     )

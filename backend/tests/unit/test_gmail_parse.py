@@ -11,13 +11,15 @@ from app.core.gmail_parse import (
     MAX_BODY_TEXT_LENGTH,
     decode_base64url,
     direction_from_labels,
+    extract_body,
+    find_html,
     find_plain_text,
     headers_by_name,
     normalize_body_text,
     parse_gmail_message,
     received_at,
 )
-from app.enums import EmailDirection
+from app.enums import EmailBodySource, EmailDirection
 
 
 def _b64url(text: str) -> str:
@@ -85,6 +87,47 @@ class TestFindPlainText:
     def test_missing_parts_and_body_do_not_raise(self) -> None:
         assert find_plain_text({}) is None
         assert find_plain_text({"mimeType": "text/plain", "body": {}}) is None
+
+
+class TestFindHtml:
+    """The mirror of `find_plain_text` — an HTML part nests just as deeply."""
+
+    def test_html_body_on_the_payload(self) -> None:
+        payload = {"mimeType": "text/html", "body": {"data": _b64url("<p>Hi</p>")}}
+        assert find_html(payload) == "<p>Hi</p>"
+
+    def test_multipart_alternative_finds_the_html_part(self) -> None:
+        payload = {
+            "mimeType": "multipart/alternative",
+            "parts": [
+                {"mimeType": "text/plain", "body": {"data": _b64url("plain")}},
+                {"mimeType": "text/html", "body": {"data": _b64url("<p>html</p>")}},
+            ],
+        }
+        assert find_html(payload) == "<p>html</p>"
+
+    def test_nested_multipart_mixed_wrapping_alternative(self) -> None:
+        payload = {
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {
+                    "mimeType": "multipart/alternative",
+                    "parts": [
+                        {"mimeType": "text/html", "body": {"data": _b64url("<p>deep</p>")}},
+                    ],
+                },
+                {"mimeType": "application/pdf", "body": {"attachmentId": "abc"}},
+            ],
+        }
+        assert find_html(payload) == "<p>deep</p>"
+
+    def test_a_plain_only_message_has_no_html(self) -> None:
+        payload = {"mimeType": "text/plain", "body": {"data": _b64url("hello")}}
+        assert find_html(payload) is None
+
+    def test_missing_parts_and_body_do_not_raise(self) -> None:
+        assert find_html({}) is None
+        assert find_html({"mimeType": "text/html", "body": {}}) is None
 
 
 class TestNormalizeBodyText:
@@ -216,10 +259,18 @@ class TestParseGmailMessage:
             "subject": "Interview invitation",
             "received_at": datetime(2026, 1, 1, tzinfo=UTC),
             "body_text": "We would like to invite you to interview.",
+            "body_source": "plain",
             "direction": "incoming",
         }
 
-    def test_falls_back_to_snippet_when_no_plain_text_part_exists(self) -> None:
+    def test_an_html_only_message_now_uses_its_html_not_the_snippet(self) -> None:
+        """The contract this slice changed.
+
+        This test previously asserted the opposite — that an HTML-only message
+        fell back to Gmail's preview — which was the defect: roughly a third of
+        stored mail was being classified from a truncated opening rather than
+        the email. The snippet is now a last resort, not the second choice.
+        """
         message = {
             "id": "1",
             "threadId": "1",
@@ -228,13 +279,14 @@ class TestParseGmailMessage:
             "payload": {
                 "headers": [],
                 "mimeType": "text/html",
-                "body": {"data": _b64url("<p>fancy html</p>")},
+                "body": {"data": _b64url("<p>The actual newsletter content.</p>")},
             },
         }
 
         parsed = parse_gmail_message(message)
 
-        assert parsed["body_text"] == "HTML-only newsletter preview"
+        assert parsed["body_text"] == "The actual newsletter content."
+        assert parsed["body_source"] == "html"
 
     def test_missing_thread_id_falls_back_to_message_id(self) -> None:
         message = {"id": "abc", "payload": {"headers": []}}
@@ -385,3 +437,198 @@ class TestNoHardcodedPersonalAddress:
             for name in type(settings).model_fields
             if name.startswith("gmail")
         )
+
+
+# ---------------------------------------------------------------------------
+# Body extraction and its fallback order
+# ---------------------------------------------------------------------------
+
+
+def _message_with(*, plain=None, html=None, snippet=None, nested=False) -> dict:
+    """A Gmail message carrying the requested parts."""
+    parts = []
+    if html is not None:
+        parts.append({"mimeType": "text/html", "body": {"data": _b64url(html)}})
+    if plain is not None:
+        parts.append({"mimeType": "text/plain", "body": {"data": _b64url(plain)}})
+
+    if nested:
+        # multipart/mixed (attachments) wrapping multipart/alternative (body),
+        # which is what an ATS email with a PDF attached actually looks like.
+        payload = {
+            "mimeType": "multipart/mixed",
+            "headers": [],
+            "parts": [
+                {"mimeType": "multipart/alternative", "parts": parts},
+                {"mimeType": "application/pdf", "body": {"attachmentId": "abc"}},
+            ],
+        }
+    else:
+        payload = {"mimeType": "multipart/alternative", "headers": [], "parts": parts}
+
+    message = {"id": "m1", "payload": payload}
+    if snippet is not None:
+        message["snippet"] = snippet
+    return message
+
+
+class TestBodyExtractionPriority:
+    def test_plain_text_wins_over_html(self) -> None:
+        message = _message_with(
+            plain="The plain version.", html="<p>The HTML version.</p>", snippet="preview"
+        )
+        body, source = extract_body(message)
+        assert body == "The plain version."
+        assert source == EmailBodySource.PLAIN
+
+    def test_html_is_used_when_there_is_no_plain_part(self) -> None:
+        """The whole point of this slice.
+
+        Before it, an HTML-only message fell straight through to the snippet.
+        """
+        message = _message_with(
+            html="<p>Dear candidate,</p><p>We will not be proceeding.</p>",
+            snippet="Dear candidate, We will not be",
+        )
+        body, source = extract_body(message)
+        assert source == EmailBodySource.HTML
+        assert "We will not be proceeding." in body
+
+    def test_a_whitespace_only_plain_part_does_not_win(self) -> None:
+        """Some senders include an empty plain part to satisfy multipart.
+
+        Treating it as a real body would keep the far better HTML from ever
+        being read — the exact bug, wearing a different hat.
+        """
+        message = _message_with(plain="   \n  ", html="<p>The real content is here.</p>")
+        body, source = extract_body(message)
+        assert source == EmailBodySource.HTML
+        assert "The real content is here." in body
+
+    def test_nested_multipart_html_is_found(self) -> None:
+        message = _message_with(html="<p>Nested HTML body</p>", nested=True)
+        body, source = extract_body(message)
+        assert source == EmailBodySource.HTML
+        assert "Nested HTML body" in body
+
+    def test_nested_multipart_still_prefers_plain(self) -> None:
+        message = _message_with(plain="Nested plain", html="<p>Nested HTML</p>", nested=True)
+        body, source = extract_body(message)
+        assert body == "Nested plain"
+        assert source == EmailBodySource.PLAIN
+
+    def test_snippet_is_used_only_when_there_is_no_body_part(self) -> None:
+        message = {"id": "m1", "payload": {"headers": []}, "snippet": "Only a preview"}
+        body, source = extract_body(message)
+        assert body == "Only a preview"
+        assert source == EmailBodySource.SNIPPET
+
+    def test_html_that_yields_no_text_falls_back_to_the_snippet(self) -> None:
+        # A tracking-pixel-only body: markup, but nothing readable.
+        message = _message_with(
+            html='<style>.a{}</style><img src="x"/>', snippet="The preview text"
+        )
+        body, source = extract_body(message)
+        assert body == "The preview text"
+        assert source == EmailBodySource.SNIPPET
+
+    def test_no_body_and_no_snippet_is_none(self) -> None:
+        body, source = extract_body({"id": "m1", "payload": {"headers": []}})
+        assert body is None
+        assert source == EmailBodySource.NONE
+
+    def test_the_source_is_recorded_on_the_parsed_row(self) -> None:
+        parsed = parse_gmail_message(_message_with(html="<p>Hello there friend</p>"))
+        assert parsed["body_source"] == "html"
+
+    def test_html_bodies_respect_the_length_cap(self) -> None:
+        long_html = "<p>" + ("word " * 20_000) + "</p>"
+        parsed = parse_gmail_message(_message_with(html=long_html))
+        assert len(parsed["body_text"]) == MAX_BODY_TEXT_LENGTH
+        assert parsed["body_source"] == "html"
+
+
+class TestHtmlOnlyRejectionRegression:
+    """The regression this slice exists for.
+
+    An HTML-only email whose opening reads like a friendly confirmation, while
+    the decision that actually matters sits several paragraphs down. Gmail's
+    snippet captures only the opening — so before HTML extraction, the
+    classifier was shown the reassuring part of a rejection and nothing else.
+
+    Anonymised; no real message is reproduced.
+    """
+
+    HTML = (
+        "<html><head><title>Update</title></head><body>"
+        '<div style="display:none">Thank you for applying to Northwind!</div>'
+        "<table><tr><td>"
+        "<p>Dear candidate,</p>"
+        "<p>Thank you for your interest in the Data Platform Engineer role at "
+        "Northwind Analytics Group, and for taking the time to speak with our "
+        "team over the past few weeks.</p>"
+        "<p>We were impressed by your background and genuinely enjoyed the "
+        "conversation about your work on streaming systems.</p>"
+        "<p>After careful consideration, we have decided not to move forward "
+        "with your application at this time.</p>"
+        "<p>We wish you every success in your search.</p>"
+        "</td></tr></table>"
+        "<script>track();</script>"
+        "</body></html>"
+    )
+
+    # What Gmail would have shown: the opening only, cut mid-sentence.
+    SNIPPET = (
+        "Dear candidate, Thank you for your interest in the Data Platform "
+        "Engineer role at Northwind Analytics Group, and for taking the time to "
+        "speak with our team over the"
+    )
+
+    def _parsed(self) -> dict:
+        return parse_gmail_message(_message_with(html=self.HTML, snippet=self.SNIPPET))
+
+    def test_the_rejection_sentence_is_present(self) -> None:
+        body = self._parsed()["body_text"]
+        assert "we have decided not to move forward with your application" in body
+
+    def test_the_body_is_not_the_snippet(self) -> None:
+        parsed = self._parsed()
+        assert parsed["body_source"] == "html"
+        assert parsed["body_text"] != self.SNIPPET
+        # Substantially more than the preview, which is the measurable win.
+        assert len(parsed["body_text"]) > len(self.SNIPPET)
+
+    def test_the_opening_is_still_there_too(self) -> None:
+        # Extraction must not swing the other way and drop the context.
+        assert "Thank you for your interest" in self._parsed()["body_text"]
+
+    def test_the_hidden_preheader_is_not_duplicated(self) -> None:
+        # The invisible inbox-preview line repeats the snippet's reassurance.
+        assert "Thank you for applying to Northwind!" not in self._parsed()["body_text"]
+
+    def test_no_markup_or_script_survives(self) -> None:
+        body = self._parsed()["body_text"]
+        assert "<p>" not in body
+        assert "track()" not in body
+        assert "Update" not in body  # the <title>
+
+    def test_paragraph_separation_is_preserved(self) -> None:
+        # Sentences must not run together, or evidence excerpts spanning a
+        # paragraph boundary would quote text that never existed.
+        body = self._parsed()["body_text"]
+        assert "\n" in body
+        assert "Dear candidate,Thank you" not in body
+
+
+class TestHtmlBodyUnicode:
+    def test_a_hebrew_html_body_survives(self) -> None:
+        message = _message_with(html="<p>תודה על פנייתך, ניצור איתך קשר בהקדם</p>")
+        body, source = extract_body(message)
+        assert source == EmailBodySource.HTML
+        assert body == "תודה על פנייתך, ניצור איתך קשר בהקדם"
+
+    def test_a_hebrew_html_body_survives_base64_round_trip(self) -> None:
+        # The decode path is utf-8 end to end: base64url -> str -> HTML parse.
+        hebrew = "מהנדס תוכנה בכיר"
+        parsed = parse_gmail_message(_message_with(html=f"<div><b>{hebrew}</b></div>"))
+        assert hebrew in parsed["body_text"]

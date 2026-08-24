@@ -9,6 +9,7 @@ token, or network access of any kind.
 import base64
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -442,6 +443,9 @@ class TestDirectionEnrichmentOnResync:
             received_at=datetime(2026, 1, 1, tzinfo=UTC),
             body_text="Original body text.",
             direction="unknown",
+            # A good body source, so these tests isolate direction enrichment.
+            # Body upgrading is covered separately in TestBodyEnrichmentOnResync.
+            body_source="plain",
         )
         db.add(message)
         db.commit()
@@ -495,10 +499,15 @@ class TestDirectionEnrichmentOnResync:
         db_session.refresh(stored)
         assert stored.direction == "incoming"
 
-    def test_enrichment_only_writes_the_direction_column(self, db_session: Session) -> None:
-        """Repairing metadata must not re-import content."""
+    def test_enrichment_never_rewrites_identifying_content(self, db_session: Session) -> None:
+        """Repairing a row must not re-import the parts it is not repairing.
+
+        Narrower than it once was: enrichment may now replace `body_text` when
+        it can be improved. Sender, subject and timestamp are still never
+        touched, which is what keeps this from becoming a silent re-import.
+        """
         stored = self._stored_unknown(db_session)
-        original = (stored.subject, stored.body_text, stored.sender, stored.received_at)
+        original = (stored.subject, stored.sender, stored.received_at)
 
         fake = FakeGmailClient(
             {
@@ -518,7 +527,7 @@ class TestDirectionEnrichmentOnResync:
 
         db_session.refresh(stored)
         assert stored.direction == "outgoing"
-        assert (stored.subject, stored.body_text, stored.sender, stored.received_at) == original
+        assert (stored.subject, stored.sender, stored.received_at) == original
 
     def test_a_known_direction_is_never_degraded_to_unknown(self, db_session: Session) -> None:
         """A row that already has a direction is not a candidate at all."""
@@ -673,3 +682,352 @@ class TestDirectionEnrichmentOnResync:
             for row in db_session.execute(select(EmailMessage)).scalars().all()
         }
         assert rows == {"stale": "incoming", "known": "incoming", "fresh": "outgoing"}
+
+
+class TestBodyEnrichmentOnResync:
+    """Snippet-backed rows are upgraded to real body text on a later sync.
+
+    The same opportunistic-backfill mechanism as direction enrichment, and for
+    the same reason: dedupe alone leaves early rows permanently worse than
+    later ones, because the message is already stored so nothing looks at it
+    again.
+
+    Safety here rests on ranking by *source*, not by length. A longer body is
+    not necessarily a better one, and comparing where the text came from is the
+    honest question.
+    """
+
+    HTML_BODY = (
+        "<p>Dear candidate,</p>"
+        "<p>Thank you for your interest in the Backend Engineer role.</p>"
+        "<p>After careful consideration, we have decided not to move forward.</p>"
+    )
+
+    def _html_message(self, message_id: str = "m1") -> dict:
+        message = _raw_message(
+            message_id,
+            subject="Update on your application",
+            sender="Talent <t@example.com>",
+            body="ignored",
+            label_ids=["INBOX"],
+        )
+        # An HTML-only message: no text/plain part anywhere.
+        message["payload"] = {
+            "headers": message["payload"]["headers"],
+            "mimeType": "text/html",
+            "body": {"data": _b64url(self.HTML_BODY)},
+        }
+        message["snippet"] = "Dear candidate, Thank you for your interest in the"
+        return message
+
+    def _stored_snippet_row(self, db: Session, gmail_message_id: str = "m1") -> EmailMessage:
+        """A row exactly as the pre-HTML-extraction importer left it."""
+        message = EmailMessage(
+            gmail_message_id=gmail_message_id,
+            thread_id=f"thread-{gmail_message_id}",
+            sender="Talent <t@example.com>",
+            subject="Update on your application",
+            received_at=datetime(2026, 1, 1, tzinfo=UTC),
+            body_text="Dear candidate, Thank you for your interest in the",
+            body_source="snippet",
+            direction="incoming",
+        )
+        db.add(message)
+        db.commit()
+        db.refresh(message)
+        return message
+
+    def test_a_snippet_row_is_upgraded_to_html_text(self, db_session: Session) -> None:
+        stored = self._stored_snippet_row(db_session)
+        fake = FakeGmailClient({"m1": self._html_message()})
+
+        result = sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.body_source == "html"
+        # The sentence the snippet cut off — the reason this matters.
+        assert "we have decided not to move forward" in stored.body_text
+        assert result.enriched == 1
+        assert result.imported == 0
+
+    def test_upgrading_creates_no_duplicate_row(self, db_session: Session) -> None:
+        self._stored_snippet_row(db_session)
+        fake = FakeGmailClient({"m1": self._html_message()})
+
+        sync_recent_messages(db_session, fake)
+
+        assert len(db_session.execute(select(EmailMessage)).scalars().all()) == 1
+
+    def test_an_unknown_source_row_is_upgraded(self, db_session: Session) -> None:
+        # Every row imported before this column existed reads `unknown`.
+        stored = self._stored_snippet_row(db_session)
+        stored.body_source = "unknown"
+        db_session.commit()
+
+        fake = FakeGmailClient({"m1": self._html_message()})
+        sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.body_source == "html"
+
+    def test_a_plain_body_is_never_replaced_by_html(self, db_session: Session) -> None:
+        """The rule that makes repeated enrichment safe.
+
+        text/plain is what the sender wrote; an HTML conversion is a rendering
+        of it. Replacing the former with the latter would be a downgrade even
+        though the result is often longer.
+        """
+        stored = self._stored_snippet_row(db_session)
+        stored.body_source = "plain"
+        stored.body_text = "The original plain text body."
+        db_session.commit()
+
+        fake = FakeGmailClient({"m1": self._html_message()})
+        result = sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.body_text == "The original plain text body."
+        assert stored.body_source == "plain"
+        assert result.enriched == 0
+
+    def test_a_row_with_a_good_body_is_never_re_fetched(self, db_session: Session) -> None:
+        # Enrichment is a one-off cost per row, not a permanent tax: a
+        # steady-state sync costs exactly what it did before it existed.
+        stored = self._stored_snippet_row(db_session)
+        stored.body_source = "html"
+        db_session.commit()
+
+        fake = FakeGmailClient({"m1": self._html_message()})
+        sync_recent_messages(db_session, fake)
+
+        assert fake.get_calls == []
+
+    def test_a_snippet_row_that_is_still_snippet_only_is_not_downgraded(
+        self, db_session: Session
+    ) -> None:
+        """A message with genuinely no body part yields nothing better.
+
+        The re-fetch happens, learns nothing, and writes nothing — rather than
+        rewriting the row with an identical snippet and reporting progress.
+        """
+        stored = self._stored_snippet_row(db_session)
+        snippet_only = _raw_message(
+            "m1", subject="s", sender="a@example.com", body="x", label_ids=["INBOX"]
+        )
+        snippet_only["payload"] = {"headers": [], "mimeType": "text/html", "body": {}}
+        snippet_only["snippet"] = "Dear candidate, Thank you for your interest in the"
+
+        fake = FakeGmailClient({"m1": snippet_only})
+        result = sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.body_source == "snippet"
+        assert result.enriched == 0
+
+    def test_direction_and_body_are_upgraded_in_one_fetch(
+        self, db_session: Session
+    ) -> None:
+        # Both gaps share a single API call rather than costing one each.
+        stored = self._stored_snippet_row(db_session)
+        stored.direction = "unknown"
+        db_session.commit()
+
+        fake = FakeGmailClient({"m1": self._html_message()})
+        result = sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.direction == "incoming"
+        assert stored.body_source == "html"
+        assert result.enriched == 1
+        assert len(fake.get_calls) == 1
+
+    def test_enrichment_is_idempotent(self, db_session: Session) -> None:
+        stored = self._stored_snippet_row(db_session)
+        fake = FakeGmailClient({"m1": self._html_message()})
+
+        first = sync_recent_messages(db_session, fake)
+        second = sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert first.enriched == 1
+        assert second.enriched == 0
+        assert stored.body_source == "html"
+        assert len(db_session.execute(select(EmailMessage)).scalars().all()) == 1
+
+    def test_a_newly_imported_message_records_its_source(
+        self, db_session: Session
+    ) -> None:
+        fake = FakeGmailClient({"m1": self._html_message()})
+
+        sync_recent_messages(db_session, fake)
+
+        row = db_session.execute(select(EmailMessage)).scalar_one()
+        assert row.body_source == "html"
+        assert "we have decided not to move forward" in row.body_text
+
+
+class TestProvenanceEnrichmentUnknownToNone:
+    """`unknown` and `none` rank equally, but they are not the same claim.
+
+    `unknown` means nobody has looked. `none` means we looked and this message
+    genuinely carries no usable body or snippet. Recording that is a gain in
+    knowledge even though no text changes — and it is invisible to the quality
+    comparison, which is why it needs its own path.
+    """
+
+    def _bodyless_message(self, message_id: str = "m1") -> dict:
+        """A message with no usable body part and no snippet."""
+        return {
+            "id": message_id,
+            "threadId": f"thread-{message_id}",
+            "internalDate": "1767225600000",
+            "labelIds": ["INBOX"],
+            "payload": {
+                "headers": [
+                    {"name": "From", "value": "a@example.com"},
+                    {"name": "Subject", "value": "No body at all"},
+                ],
+                "mimeType": "text/html",
+                "body": {},
+            },
+        }
+
+    def _stored(
+        self,
+        db: Session,
+        *,
+        body_source: str,
+        body_text: str | None,
+        gmail_message_id: str = "m1",
+    ) -> EmailMessage:
+        message = EmailMessage(
+            gmail_message_id=gmail_message_id,
+            thread_id=f"thread-{gmail_message_id}",
+            sender="a@example.com",
+            subject="No body at all",
+            received_at=datetime(2026, 1, 1, tzinfo=UTC),
+            body_text=body_text,
+            body_source=body_source,
+            direction="incoming",
+        )
+        db.add(message)
+        db.commit()
+        db.refresh(message)
+        return message
+
+    def test_unknown_becomes_none_when_the_message_has_no_body(
+        self, db_session: Session
+    ) -> None:
+        stored = self._stored(db_session, body_source="unknown", body_text=None)
+        fake = FakeGmailClient({"m1": self._bodyless_message()})
+
+        result = sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.body_source == "none"
+        assert result.enriched == 1
+
+    def test_no_body_content_is_invented(self, db_session: Session) -> None:
+        """The label changes; the text does not appear from nowhere."""
+        stored = self._stored(db_session, body_source="unknown", body_text=None)
+        fake = FakeGmailClient({"m1": self._bodyless_message()})
+
+        sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.body_text is None
+
+    def test_a_row_with_text_is_never_relabelled_as_having_none(
+        self, db_session: Session
+    ) -> None:
+        """A stored body outranks a fresh parse that disagrees with it.
+
+        Marking a row "no body" while it visibly holds content would make the
+        label false, so the contradiction is left alone rather than resolved in
+        favour of the newer answer.
+        """
+        stored = self._stored(
+            db_session, body_source="unknown", body_text="Some real content here."
+        )
+        fake = FakeGmailClient({"m1": self._bodyless_message()})
+
+        result = sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.body_source == "unknown"
+        assert stored.body_text == "Some real content here."
+        assert result.enriched == 0
+
+    def test_a_whitespace_only_body_does_not_block_the_relabel(
+        self, db_session: Session
+    ) -> None:
+        stored = self._stored(db_session, body_source="unknown", body_text="   \n ")
+        fake = FakeGmailClient({"m1": self._bodyless_message()})
+
+        sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.body_source == "none"
+
+    @pytest.mark.parametrize("good_source", ["plain", "html", "snippet"])
+    def test_a_known_source_is_never_degraded_to_none(
+        self, db_session: Session, good_source: str
+    ) -> None:
+        """Downgrading is impossible from any determined source.
+
+        The provenance path is reachable only from `unknown`; everything else
+        goes through the quality comparison, which `none` can never win.
+        """
+        stored = self._stored(
+            db_session, body_source=good_source, body_text="Real stored body text."
+        )
+        fake = FakeGmailClient({"m1": self._bodyless_message()})
+
+        result = sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.body_source == good_source
+        assert stored.body_text == "Real stored body text."
+        assert result.enriched == 0
+
+    def test_relabelling_is_not_repeated_on_a_later_sync(
+        self, db_session: Session
+    ) -> None:
+        # Once recorded, `none` is a settled answer: the row is still re-checked
+        # (a future parser improvement could rescue it) but nothing is written
+        # and no progress is reported.
+        stored = self._stored(db_session, body_source="unknown", body_text=None)
+        fake = FakeGmailClient({"m1": self._bodyless_message()})
+
+        first = sync_recent_messages(db_session, fake)
+        second = sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert (first.enriched, second.enriched) == (1, 0)
+        assert stored.body_source == "none"
+
+    def test_a_bodyless_message_imported_fresh_records_none(
+        self, db_session: Session
+    ) -> None:
+        fake = FakeGmailClient({"m1": self._bodyless_message()})
+
+        sync_recent_messages(db_session, fake)
+
+        row = db_session.execute(select(EmailMessage)).scalar_one()
+        assert row.body_source == "none"
+        assert row.body_text is None
+
+    def test_unknown_still_prefers_a_real_body_when_one_exists(
+        self, db_session: Session
+    ) -> None:
+        # The provenance path must not shadow the ordinary content upgrade.
+        stored = self._stored(db_session, body_source="unknown", body_text=None)
+        with_body = self._bodyless_message()
+        with_body["payload"]["body"] = {"data": _b64url("<p>Actual content arrived.</p>")}
+
+        fake = FakeGmailClient({"m1": with_body})
+        sync_recent_messages(db_session, fake)
+
+        db_session.refresh(stored)
+        assert stored.body_source == "html"
+        assert "Actual content arrived." in stored.body_text

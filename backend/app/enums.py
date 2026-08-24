@@ -221,6 +221,54 @@ class EmailDirection(StrEnum):
     UNKNOWN = "unknown"
 
 
+class EmailBodySource(StrEnum):
+    """Where a stored message's `body_text` actually came from.
+
+    Recorded because "why is this body only 200 characters?" was, for a while,
+    unanswerable. A Gmail `snippet` and a genuinely short email look identical
+    once stored, so there was no way to tell which rows were previews and which
+    were complete — and therefore no safe way to improve the previews without
+    risking overwriting good content.
+
+    Ordered by quality (see `BODY_SOURCE_QUALITY`), which is what lets a later
+    sync upgrade a row without ever downgrading one.
+    """
+
+    # A real text/plain MIME part: what the sender wrote, as they wrote it.
+    PLAIN = "plain"
+    # Converted locally from text/html because no usable text/plain part existed.
+    HTML = "html"
+    # Gmail's ~200-character preview. A last resort: it is truncated mid-
+    # sentence and routinely contains only the polite opening of a message
+    # whose actual decision comes later.
+    SNIPPET = "snippet"
+    # No body at all.
+    NONE = "none"
+    # Imported before this column existed, so the source was never recorded.
+    UNKNOWN = "unknown"
+
+
+# How good each body source is. A sync may replace a stored body only with one
+# that ranks strictly higher, which is what makes enrichment safe to run
+# repeatedly: a good body can never be overwritten by a worse one.
+BODY_SOURCE_QUALITY: dict[EmailBodySource, int] = {
+    EmailBodySource.PLAIN: 3,
+    EmailBodySource.HTML: 2,
+    EmailBodySource.SNIPPET: 1,
+    EmailBodySource.NONE: 0,
+    # Unknown ranks lowest so that any freshly determined source is an
+    # improvement on "we never recorded it".
+    EmailBodySource.UNKNOWN: 0,
+}
+
+# Sources worth re-fetching a stored message for. Once a row holds plain or
+# html text there is nothing better to find, so it is never fetched again and a
+# steady-state sync costs exactly what it did before enrichment existed.
+UPGRADABLE_BODY_SOURCES: frozenset[EmailBodySource] = frozenset(
+    {EmailBodySource.UNKNOWN, EmailBodySource.SNIPPET, EmailBodySource.NONE}
+)
+
+
 class EmailMessageType(StrEnum):
     """What a recruitment email *means* — the classifier's semantic vocabulary.
 

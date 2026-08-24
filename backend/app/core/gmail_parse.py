@@ -11,7 +11,8 @@ import html
 from collections.abc import Iterable
 from datetime import UTC, datetime
 
-from app.enums import EmailDirection
+from app.core.html_text import html_to_text
+from app.enums import EmailBodySource, EmailDirection
 
 # A plain-text email is comfortably a few KB. This is a defensive cap against a
 # pathological message (a giant newsletter, a quoted thread), not a realistic
@@ -49,6 +50,38 @@ def find_plain_text(payload: dict) -> str | None:
             return found
 
     return None
+
+
+def find_html(payload: dict) -> str | None:
+    """Depth-first search for the first `text/html` part's decoded body.
+
+    The mirror of `find_plain_text`, and needed for the same reason: an
+    HTML-only message from an applicant-tracking system has its markup nested
+    exactly as deep as a plain part would be.
+    """
+    if payload.get("mimeType") == "text/html":
+        data = (payload.get("body") or {}).get("data")
+        if data:
+            return decode_base64url(data)
+
+    for part in payload.get("parts") or []:
+        found = find_html(part)
+        if found is not None:
+            return found
+
+    return None
+
+
+def _usable(text: str | None) -> str | None:
+    """A body is usable only if it has non-whitespace content.
+
+    An empty or whitespace-only `text/plain` part is common in HTML mail — some
+    senders include one purely to satisfy multipart/alternative. Treating it as
+    a real body would keep the far better HTML from ever being read.
+    """
+    if text is None:
+        return None
+    return text if text.strip() else None
 
 
 def normalize_body_text(text: str) -> str:
@@ -131,6 +164,41 @@ def received_at(message: dict) -> datetime:
     return datetime.now(UTC)
 
 
+def extract_body(message: dict) -> tuple[str | None, EmailBodySource]:
+    """The best available body text, and where it came from.
+
+    Priority, best first:
+
+      1. `text/plain` — what the sender actually wrote.
+      2. `text/html`, converted locally — the same message, minus the markup.
+         Reached only when there is no usable plain part, which is the normal
+         shape for applicant-tracking system mail.
+      3. Gmail's `snippet` — a ~200-character preview, truncated mid-sentence.
+         A genuine last resort: it frequently contains a message's polite
+         opening while the decision that matters sits further down, so a
+         classifier reading it is reading the wrong thing.
+
+    HTML text is not passed through `normalize_body_text`: `html_to_text`
+    decodes entities as it parses, and a second unescape pass could decode text
+    that was legitimately literal.
+    """
+    payload = message.get("payload") or {}
+
+    plain = _usable(find_plain_text(payload))
+    if plain:
+        return normalize_body_text(plain), EmailBodySource.PLAIN
+
+    html_body = _usable(html_to_text(find_html(payload)))
+    if html_body:
+        return html_body, EmailBodySource.HTML
+
+    snippet = _usable(message.get("snippet"))
+    if snippet:
+        return normalize_body_text(snippet), EmailBodySource.SNIPPET
+
+    return None, EmailBodySource.NONE
+
+
 def parse_gmail_message(message: dict) -> dict:
     """Extract exactly the fields `EmailMessage` stores from a raw API message.
 
@@ -140,16 +208,9 @@ def parse_gmail_message(message: dict) -> dict:
     payload = message.get("payload") or {}
     headers = headers_by_name(payload.get("headers") or [])
 
-    # Plain text first; Gmail's own snippet (a short preview it always
-    # computes) is a reasonable fallback when no text/plain part exists at all
-    # (e.g. an HTML-only marketing email).
-    body_text = find_plain_text(payload) or message.get("snippet") or None
-    if body_text:
-        # Decode entities before capping length, so a long body is never
-        # truncated mid-entity (e.g. left dangling on "&rsq").
-        body_text = normalize_body_text(body_text)
-        if len(body_text) > MAX_BODY_TEXT_LENGTH:
-            body_text = body_text[:MAX_BODY_TEXT_LENGTH]
+    body_text, body_source = extract_body(message)
+    if body_text and len(body_text) > MAX_BODY_TEXT_LENGTH:
+        body_text = body_text[:MAX_BODY_TEXT_LENGTH]
 
     return {
         "gmail_message_id": message["id"],
@@ -158,6 +219,7 @@ def parse_gmail_message(message: dict) -> dict:
         "subject": headers.get("subject") or None,
         "received_at": received_at(message),
         "body_text": body_text,
+        "body_source": body_source.value,
         # `labelIds` lives on the message, not the payload — it is Gmail's own
         # metadata about the message, not part of its MIME content.
         "direction": direction_from_labels(message.get("labelIds")).value,
