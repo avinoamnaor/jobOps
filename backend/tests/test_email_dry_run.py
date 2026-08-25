@@ -444,3 +444,116 @@ def test_every_classifiable_direction_reaches_the_provider(
     dry_run_classify(db_session, fake, [message.id])
 
     assert len(fake.calls) == 1
+
+
+class TestMatchingIsIncludedInTheDryRun:
+    """Identity is decided alongside meaning, from the same read-only session."""
+
+    def test_a_match_is_attached_when_an_application_exists(
+        self, db_session: Session
+    ) -> None:
+        from app.enums import ApplicationStatus, MatchStatus
+        from app.schemas.application import ApplicationCreate
+        from app.services.applications import create_application
+
+        application = create_application(
+            db_session,
+            ApplicationCreate(
+                company_name="Brightpath Systems",
+                role_title="Backend Engineer",
+                status=ApplicationStatus.SAVED,
+            ),
+        )
+        message = _store(db_session)
+
+        outcome = dry_run_classify(db_session, FakeClassifier(), [message.id])[0]
+
+        assert outcome.match is not None
+        assert outcome.match.status is MatchStatus.MATCHED
+        assert outcome.match.application_id == application.id
+
+    def test_no_application_yields_no_match_not_an_error(
+        self, db_session: Session
+    ) -> None:
+        from app.enums import MatchStatus
+
+        message = _store(db_session)
+
+        outcome = dry_run_classify(db_session, FakeClassifier(), [message.id])[0]
+
+        assert outcome.match is not None
+        assert outcome.match.status is MatchStatus.NO_MATCH
+        assert outcome.match.application_id is None
+        assert outcome.error is None
+
+    def test_a_skipped_outgoing_message_is_never_matched(
+        self, db_session: Session
+    ) -> None:
+        # Direction gates everything, matching included.
+        message = _store(db_session, direction="outgoing")
+
+        outcome = dry_run_classify(db_session, FakeClassifier(), [message.id])[0]
+
+        assert outcome.skipped
+        assert outcome.match is None
+
+    def test_a_classification_error_leaves_matching_unattempted(
+        self, db_session: Session
+    ) -> None:
+        # There is nothing to match on without a company and role.
+        message = _store(db_session)
+        fake = FakeClassifier(raises=EmailClassificationFailed("provider timeout"))
+
+        outcome = dry_run_classify(db_session, fake, [message.id])[0]
+
+        assert outcome.error is not None
+        assert outcome.match is None
+
+    def test_matching_writes_nothing(self, db_session: Session) -> None:
+        from app.enums import ApplicationStatus
+        from app.schemas.application import ApplicationCreate
+        from app.services.applications import create_application
+
+        application = create_application(
+            db_session,
+            ApplicationCreate(
+                company_name="Brightpath Systems",
+                role_title="Backend Engineer",
+                status=ApplicationStatus.SAVED,
+            ),
+        )
+        before = (application.status, application.updated_at)
+        message = _store(db_session)
+
+        dry_run_classify(db_session, FakeClassifier(), [message.id])
+
+        db_session.refresh(application)
+        assert (application.status, application.updated_at) == before
+        assert db_session.execute(select(Suggestion)).scalars().all() == []
+
+    def test_the_cli_prints_the_match_and_its_reason(
+        self, db_session: Session, capsys
+    ) -> None:
+        from app.enums import ApplicationStatus
+        from app.schemas.application import ApplicationCreate
+        from app.services.applications import create_application
+
+        create_application(
+            db_session,
+            ApplicationCreate(
+                company_name="Brightpath Systems",
+                role_title="Backend Engineer",
+                status=ApplicationStatus.SAVED,
+            ),
+        )
+        message = _store(db_session)
+        outcome = dry_run_classify(db_session, FakeClassifier(), [message.id])[0]
+
+        _load_cli().print_outcome(outcome)
+
+        printed = capsys.readouterr().out
+        assert "match" in printed
+        assert "matched" in printed
+        # The answer to "why did JobOps think this?" is printed, not implied.
+        assert "why" in printed
+        assert "signals" in printed

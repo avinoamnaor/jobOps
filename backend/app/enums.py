@@ -391,6 +391,64 @@ CLASSIFIABLE_EMAIL_DIRECTIONS: frozenset[EmailDirection] = frozenset(
 )
 
 
+class MatchStatus(StrEnum):
+    """Whether a classified email could be tied to an existing Application.
+
+    Three outcomes, and the middle one is load-bearing. Without AMBIGUOUS the
+    matcher would have to choose between inventing a match it cannot justify and
+    reporting nothing at all — when the useful answer is often "here are the two
+    applications this could be, you decide".
+
+    The guiding rule is that a false NO_MATCH costs a manual link, while a false
+    MATCHED silently files an employer's rejection against the wrong job. Those
+    are not comparable, so the matcher declines whenever the evidence is thin.
+    """
+
+    MATCHED = "matched"
+    AMBIGUOUS = "ambiguous"
+    NO_MATCH = "no_match"
+
+
+class MatchConfidence(StrEnum):
+    """How sure the matcher is about *identity*.
+
+    Deliberately not `ClassificationConfidence`. That one says how sure a model
+    is about what an email means; this says how sure deterministic logic is about
+    which application it belongs to. A message can be an unmistakable rejection
+    (classification: high) whose employer matches four saved applications
+    (matching: ambiguous) — collapsing the two would destroy exactly the
+    distinction a reviewer needs.
+    """
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class CompanySignal(StrEnum):
+    """How the email's company related to the matched application's."""
+
+    # The names were already identical, ignoring case and surrounding space.
+    EXACT = "exact"
+    # They agreed only after normalisation — a legal suffix, punctuation, or
+    # accents differed. Recorded separately because "we transformed the input to
+    # make it fit" is weaker evidence than "they were the same".
+    NORMALIZED = "normalized"
+    # A company was extracted, but no application matched it.
+    NONE = "none"
+    # The classifier did not extract a company at all.
+    MISSING = "missing"
+
+
+class RoleSignal(StrEnum):
+    """How the email's role related to the matched application's."""
+
+    EXACT = "exact"
+    NORMALIZED = "normalized"
+    NONE = "none"
+    MISSING = "missing"
+
+
 def sql_value_list(enum_cls: type[StrEnum]) -> str:
     """Render an enum as a SQL literal list, for CHECK constraints."""
     return ", ".join(f"'{member.value}'" for member in enum_cls)

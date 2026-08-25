@@ -115,6 +115,20 @@ def print_outcome(outcome: DryRunOutcome) -> None:
     print(f"      grounded    {'yes' if outcome.grounded else 'NO'}")
     for excerpt in result.evidence:
         print(f"      evidence    {excerpt!r}")
+
+    match = outcome.match
+    if match is not None:
+        print(f"      match       {match.status.value}", end="")
+        if match.application_id is not None:
+            print(f"  -> application #{match.application_id}", end="")
+        if match.confidence is not None:
+            print(f"  ({match.confidence.value} confidence)", end="")
+        print()
+        if match.candidate_ids:
+            listed = ", ".join(f"#{candidate}" for candidate in match.candidate_ids)
+            print(f"      candidates  {listed}")
+        print(f"      signals     {match.signals.describe()}")
+        print(f"      why         {match.reason}")
     print()
 
 
@@ -138,6 +152,14 @@ def print_summary(outcomes: list[DryRunOutcome]) -> None:
     grounded = sum(1 for o in classified if o.grounded)
     if classified:
         print(f"  grounded         {grounded}/{len(classified)}")
+
+    matches = [o.match for o in classified if o.match is not None]
+    if matches:
+        by_status: dict[str, int] = {}
+        for match in matches:
+            by_status[match.status.value] = by_status.get(match.status.value, 0) + 1
+        rendered = " ".join(f"{status}={count}" for status, count in sorted(by_status.items()))
+        print(f"  matching         {rendered}")
 
     totals = [o.counts for o in found if o.counts is not None]
     if totals:

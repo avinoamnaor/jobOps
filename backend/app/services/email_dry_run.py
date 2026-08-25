@@ -34,6 +34,11 @@ from app.enums import EmailDirection
 from app.models.email_message import EmailMessage
 from app.schemas.classification import EmailClassification
 from app.services.email_classifier import ClassificationInput, EmailClassifier
+from app.services.email_matching import (
+    MatchInput,
+    MatchResult,
+    match_email_to_application,
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,10 @@ class DryRunOutcome:
     grounded: bool | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    # Which application this email refers to, decided deterministically from the
+    # classification's company and role. Present only when classification
+    # succeeded — there is nothing to match on otherwise.
+    match: MatchResult | None = None
 
     @property
     def skipped(self) -> bool:
@@ -154,6 +163,16 @@ def dry_run_classify(
             body_text=sanitized.body_text,
         )
 
+        # Identity, decided separately from meaning and from the same session.
+        # Deterministic and read-only: no provider call, nothing written.
+        match = match_email_to_application(
+            db,
+            MatchInput(
+                company_name=classification.company_name,
+                role_title=classification.role_title,
+            ),
+        )
+
         usage = getattr(classifier, "last_usage", None)
         outcomes.append(
             DryRunOutcome(
@@ -166,6 +185,7 @@ def dry_run_classify(
                 grounded=grounded,
                 input_tokens=getattr(usage, "input_tokens", None),
                 output_tokens=getattr(usage, "output_tokens", None),
+                match=match,
             )
         )
 
