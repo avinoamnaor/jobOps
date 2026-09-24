@@ -523,23 +523,11 @@ def _consider_status_change(
     *Would it be refused?* Asked of `status_change_blocker`, the same function
     `change_status` uses, so this cannot drift from the real rule.
     """
-    current = ApplicationStatus(application.status)
-
-    if proposed_status is not ApplicationStatus.REJECTED:
-        # A rejection is an ending rather than a stage, so it is never
-        # "backwards"; everything else must be forward progress.
-        current_stage = STAGE_ORDER.get(current)
-        proposed_stage = STAGE_ORDER.get(proposed_status)
-        if current_stage is None:
-            return (
-                f"No status change proposed: '{current.value}' is a terminal or hold "
-                "status, and an inbound email should not reopen it"
-            )
-        if proposed_stage is not None and current_stage >= proposed_stage:
-            return (
-                f"No status change proposed: the application is already at "
-                f"'{current.value}', which is at or beyond '{proposed_status.value}'"
-            )
+    progression = status_progression_problem(
+        ApplicationStatus(application.status), proposed_status
+    )
+    if progression is not None:
+        return f"No status change proposed: {progression}"
 
     blocker = status_change_blocker(
         current_status=application.status.value,
@@ -560,6 +548,34 @@ def _consider_status_change(
             to_status=proposed_status,
         )
     )
+    return None
+
+
+def status_progression_problem(
+    current: ApplicationStatus, proposed_status: ApplicationStatus
+) -> str | None:
+    """Why an email-derived move from `current` to `proposed_status` is not progress.
+
+    None means it is. The policy uses this when composing a plan, and the
+    email-plan executor asks it again at approval time — the application may
+    have moved since — so both apply exactly one rule.
+    """
+    if proposed_status is ApplicationStatus.REJECTED:
+        # A rejection is an ending rather than a stage, so it is never
+        # "backwards"; everything else must be forward progress.
+        return None
+    current_stage = STAGE_ORDER.get(current)
+    proposed_stage = STAGE_ORDER.get(proposed_status)
+    if current_stage is None:
+        return (
+            f"'{current.value}' is a terminal or hold status, and an inbound email "
+            "should not reopen it"
+        )
+    if proposed_stage is not None and current_stage >= proposed_stage:
+        return (
+            f"the application is already at '{current.value}', which is at or beyond "
+            f"'{proposed_status.value}'"
+        )
     return None
 
 

@@ -13,6 +13,7 @@ from app.db import get_db
 from app.enums import SuggestionKind, SuggestionState
 from app.models.suggestion import Suggestion
 from app.schemas.suggestion import (
+    EmailPlanRead,
     SuggestionAcceptRequest,
     SuggestionCreate,
     SuggestionRead,
@@ -21,6 +22,13 @@ from app.schemas.suggestion import (
 from app.services import suggestions as suggestion_service
 
 router = APIRouter(prefix="/suggestions", tags=["suggestions"])
+
+
+def _read(suggestion: Suggestion) -> SuggestionWithApplication | EmailPlanRead:
+    """Each kind in its own shape: status changes exactly as before, plans with actions."""
+    if suggestion.kind == SuggestionKind.EMAIL_PLAN.value:
+        return EmailPlanRead.model_validate(suggestion)
+    return _with_application(suggestion)
 
 
 def _with_application(suggestion: Suggestion) -> SuggestionWithApplication:
@@ -69,25 +77,49 @@ def list_suggestions(
     return [_with_application(item) for item in suggestions]
 
 
-@router.post("/{suggestion_id}/accept", response_model=SuggestionWithApplication)
+@router.get("/email-plans", response_model=list[EmailPlanRead])
+def list_email_plans(
+    state: SuggestionState | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> object:
+    """Email-derived suggestions with their ordered actions. Reads only."""
+    return [
+        EmailPlanRead.model_validate(item)
+        for item in suggestion_service.list_email_plans(db, state=state)
+    ]
+
+
+@router.post(
+    "/{suggestion_id}/accept",
+    response_model=SuggestionWithApplication | EmailPlanRead,
+)
 def accept_suggestion(
     suggestion_id: int,
     payload: SuggestionAcceptRequest,
     db: Session = Depends(get_db),
 ) -> object:
-    """Accept: routes through the real status-change service (see services/suggestions.py).
+    """Accept a suggestion (see services/suggestions.py).
 
-    A `status_changed` timeline event is written exactly as it would be for a
-    manual change, and every existing rule (e.g. the submitted-CV requirement)
-    still applies — an accept that would break a rule fails instead of silently
-    resolving the suggestion.
+    A status-change suggestion routes through the real status-change service, as
+    before. An email plan executes all its actions in order in one transaction —
+    all or nothing; any failure leaves it pending and changes nothing. Either
+    way, an accept that would break a rule fails instead of resolving.
     """
-    suggestion = suggestion_service.accept_suggestion(db, suggestion_id, note=payload.note)
-    return _with_application(suggestion)
+    suggestion = suggestion_service.accept_suggestion(
+        db,
+        suggestion_id,
+        note=payload.note,
+        role_title=payload.role_title,
+        application_channel=payload.application_channel,
+    )
+    return _read(suggestion)
 
 
-@router.post("/{suggestion_id}/reject", response_model=SuggestionWithApplication)
+@router.post(
+    "/{suggestion_id}/reject",
+    response_model=SuggestionWithApplication | EmailPlanRead,
+)
 def reject_suggestion(suggestion_id: int, db: Session = Depends(get_db)) -> object:
-    """Reject: marks the suggestion only. The application is never touched."""
+    """Reject/dismiss: marks the suggestion only. Nothing is executed."""
     suggestion = suggestion_service.reject_suggestion(db, suggestion_id)
-    return _with_application(suggestion)
+    return _read(suggestion)

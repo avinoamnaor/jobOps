@@ -23,7 +23,7 @@ from app.core.errors import (
     EmailMessageNotFound,
     InvalidSuggestionPlan,
     OutgoingMessageNotClassifiable,
-    SuggestionKindNotSupported,
+    SuggestionApprovalInputInvalid,
 )
 from app.enums import (
     ApplicationChannel,
@@ -610,24 +610,28 @@ class TestBackwardCompatibility:
             db_session.commit()
         db_session.rollback()
 
-    def test_accept_and_reject_refuse_email_plans(self, db_session: Session) -> None:
+    def test_status_change_accept_refuses_creation_inputs(self, db_session: Session) -> None:
+        # Approval inputs for a created application mean nothing to a plain
+        # status change; refused rather than silently ignored.
         application = _applied_application(db_session)
-        message = _email(db_session)
-        suggestion, _ = persist_email_plan(
+        suggestion = create_suggestion(
             db_session,
-            email_message_id=message.id,
-            plan=_matched_plan(application, EmailMessageType.REJECTION),
+            application_id=application.id,
+            proposed_status=ApplicationStatus.HR_INTERVIEW,
+            source=SuggestionSource.MANUAL,
+            confidence=SuggestionConfidence.HIGH,
+            rationale="Recruiter called",
         )
 
-        with pytest.raises(SuggestionKindNotSupported):
-            accept_suggestion(db_session, suggestion.id)
-        with pytest.raises(SuggestionKindNotSupported):
-            reject_suggestion(db_session, suggestion.id)
+        with pytest.raises(SuggestionApprovalInputInvalid):
+            accept_suggestion(db_session, suggestion.id, role_title="Engineer")
 
         db_session.refresh(suggestion)
         db_session.refresh(application)
         assert suggestion.state == SuggestionState.PENDING
         assert application.status == ApplicationStatus.APPLIED
+        # And the status-change reject path is unchanged.
+        assert reject_suggestion(db_session, suggestion.id).state == SuggestionState.REJECTED
 
     def test_api_lists_only_status_change_suggestions(
         self, client: TestClient, db_session: Session
@@ -652,7 +656,6 @@ class TestBackwardCompatibility:
         assert response.status_code == 200
         assert [item["id"] for item in response.json()] == [legacy.id]
 
-        accept = client.post(f"/suggestions/{plan_row.id}/accept", json={})
-        assert accept.status_code == 409
-        reject = client.post(f"/suggestions/{plan_row.id}/reject")
-        assert reject.status_code == 409
+        plans = client.get("/suggestions/email-plans", params={"state": "pending"})
+        assert plans.status_code == 200
+        assert [item["id"] for item in plans.json()] == [plan_row.id]

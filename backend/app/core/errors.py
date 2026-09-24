@@ -262,6 +262,21 @@ class OutgoingMessageNotClassifiable(JobOpsError):
         )
 
 
+class EmailBatchTooLarge(JobOpsError):
+    """More emails were named for processing than one batch allows.
+
+    Every processed email is a paid request carrying (sanitised) personal text
+    to a third party, so an oversized list is refused before anything runs.
+    """
+
+    def __init__(self, requested: int, limit: int) -> None:
+        super().__init__(
+            f"Refusing to process {requested} emails in one batch; the limit is {limit}"
+        )
+        self.requested = requested
+        self.limit = limit
+
+
 class SuggestionNotFound(JobOpsError):
     def __init__(self, suggestion_id: int) -> None:
         super().__init__(f"Suggestion {suggestion_id} does not exist")
@@ -284,23 +299,33 @@ class SuggestionAlreadyResolved(JobOpsError):
         self.state = state
 
 
-class SuggestionKindNotSupported(JobOpsError):
-    """Accept/reject was attempted on a suggestion kind that flow cannot handle.
+class EmailPlanNotExecutable(JobOpsError):
+    """An email plan can no longer be approved as proposed.
 
-    The original review flow understands exactly one shape — a single status
-    change for an existing application. Email-derived plans can carry several
-    ordered actions, or propose creating an application, so accepting one
-    through that flow would silently do the wrong thing. Refused instead until
-    plan approval exists.
+    Raised at approval time when the world has moved since the plan was made —
+    for example the application already reached (or passed) the proposed
+    status, or was closed. Nothing is executed and the suggestion stays pending:
+    it can be dismissed, or approved later if circumstances change back.
     """
 
-    def __init__(self, suggestion_id: int, kind: str) -> None:
-        super().__init__(
-            f"Suggestion {suggestion_id} is a '{kind}' suggestion, which cannot be "
-            "accepted or rejected through this flow yet"
-        )
+    def __init__(self, suggestion_id: int, detail: str) -> None:
+        super().__init__(f"Suggestion {suggestion_id} cannot be approved: {detail}")
         self.suggestion_id = suggestion_id
-        self.kind = kind
+        self.detail = detail
+
+
+class SuggestionApprovalInputInvalid(JobOpsError):
+    """Approval input is missing or does not apply to this suggestion.
+
+    An email plan that creates an application may lack a role or a channel the
+    email never stated; those are supplied by the user at approval rather than
+    invented. Supplying them where nothing will use them is refused too, so a
+    request never looks like it did something it did not.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 class InvalidSuggestionPlan(JobOpsError):

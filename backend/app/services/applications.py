@@ -176,7 +176,27 @@ def list_applications(
 
 
 def create_application(db: Session, data: ApplicationCreate) -> Application:
+    """Create an application and commit. See `create_application_in_transaction`."""
+    application = create_application_in_transaction(db, data)
+    db.commit()
+    db.refresh(application)
+    return application
+
+
+def create_application_in_transaction(
+    db: Session,
+    data: ApplicationCreate,
+    *,
+    source: EventSource = EventSource.MANUAL,
+) -> Application:
     """Create an application and open its timeline with a `created` event.
+
+    Flushes (so the new row has an id) but never commits: the caller owns the
+    transaction. `create_application` is the committing wrapper every existing
+    caller uses; the email-plan executor calls this directly so a creation and
+    the actions after it land together or not at all. `source` attributes the
+    timeline events honestly — an application created from an approved email
+    plan is `gmail`, not something the user typed.
 
     The `created` event carries `new_status`, so replaying the log reproduces the
     status from the very first entry. Emitting a separate `status_changed` event
@@ -228,7 +248,7 @@ def create_application(db: Session, data: ApplicationCreate) -> Application:
         application,
         new_status=data.status,
         event_type=EventType.CREATED,
-        source=EventSource.MANUAL,
+        source=source,
         summary=f"Application created with status '{data.status.value}'",
         note=None,
         occurred_at=now,
@@ -244,7 +264,7 @@ def create_application(db: Session, data: ApplicationCreate) -> Application:
                 application_id=application.id,
                 event_type=EventType.DOCUMENT_ATTACHED.value,
                 occurred_at=now,
-                source=EventSource.MANUAL.value,
+                source=source.value,
                 document_id=cv_document.id,
                 summary=f"Submitted CV attached: {document_name}"[:300],
             )
@@ -254,8 +274,7 @@ def create_application(db: Session, data: ApplicationCreate) -> Application:
     if data.applied_at is not None:
         application.applied_at = data.applied_at
 
-    db.commit()
-    db.refresh(application)
+    db.flush()
     return application
 
 
@@ -313,6 +332,38 @@ def change_status(
     log records what actually happened, which is more useful than a rule that
     says it could not have.
     """
+    application = apply_status_change(
+        db,
+        application_id,
+        to_status=to_status,
+        note=note,
+        occurred_at=occurred_at,
+        source=source,
+    )
+
+    # One commit -> one transaction -> the column update and the event insert are
+    # applied together or not at all.
+    db.commit()
+    db.refresh(application)
+    return application
+
+
+def apply_status_change(
+    db: Session,
+    application_id: int,
+    *,
+    to_status: ApplicationStatus,
+    note: str | None = None,
+    occurred_at: datetime | None = None,
+    source: EventSource = EventSource.MANUAL,
+) -> Application:
+    """`change_status` without the commit — the caller owns the transaction.
+
+    Same guards (via `status_change_blocker`), same `_record_status` write, same
+    errors. Exists so a caller that must apply several changes atomically (the
+    email-plan executor) can include a status change in its own transaction
+    without a second copy of the status rules.
+    """
     application = get_application(db, application_id)
 
     blocker = status_change_blocker(
@@ -338,11 +389,7 @@ def change_status(
         note=note,
         occurred_at=when,
     )
-
-    # One commit -> one transaction -> the column update and the event insert are
-    # applied together or not at all.
-    db.commit()
-    db.refresh(application)
+    db.flush()
     return application
 
 

@@ -19,6 +19,7 @@ from app.core.errors import (
     DocumentNotFound,
     DocumentTooLarge,
     EmailMessageNotFound,
+    EmailPlanNotExecutable,
     EmptyDocument,
     ExportRequiresSubmittedCv,
     FolderOpenFailed,
@@ -29,7 +30,7 @@ from app.core.errors import (
     SubmittedCvRequired,
     SubmittedCvUnchanged,
     SuggestionAlreadyResolved,
-    SuggestionKindNotSupported,
+    SuggestionApprovalInputInvalid,
     SuggestionNotFound,
     UnsafeDocumentPath,
 )
@@ -146,12 +147,17 @@ def handle_suggestion_already_resolved(_: Request, exc: SuggestionAlreadyResolve
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
-@app.exception_handler(SuggestionKindNotSupported)
-def handle_suggestion_kind_not_supported(
-    _: Request, exc: SuggestionKindNotSupported
-) -> JSONResponse:
-    # 409: the suggestion exists, but its kind conflicts with this operation.
+@app.exception_handler(EmailPlanNotExecutable)
+def handle_email_plan_not_executable(_: Request, exc: EmailPlanNotExecutable) -> JSONResponse:
+    # 409: the plan conflicts with the application's current state.
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(SuggestionApprovalInputInvalid)
+def handle_suggestion_approval_input_invalid(
+    _: Request, exc: SuggestionApprovalInputInvalid
+) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
 @app.exception_handler(InvalidSuggestionPlan)

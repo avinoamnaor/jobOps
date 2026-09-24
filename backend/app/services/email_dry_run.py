@@ -27,25 +27,14 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.classification_evidence import unverifiable_evidence
-from app.core.email_sanitizer import SanitizationCounts, sanitize_email
-from app.core.errors import JobOpsError, OutgoingMessageNotClassifiable
-from app.enums import ApplicationStatus, EmailDirection
-from app.models.application import Application
+from app.core.email_sanitizer import SanitizationCounts
+from app.enums import EmailDirection
 from app.models.email_message import EmailMessage
 from app.schemas.classification import EmailClassification
-from app.services.email_classifier import ClassificationInput, EmailClassifier
-from app.services.email_matching import (
-    MatchInput,
-    MatchResult,
-    match_email_to_application,
-)
-from app.services.email_policy import (
-    ApplicationContext,
-    PolicyInput,
-    SuggestionPlan,
-    decide,
-)
+from app.services.email_classifier import EmailClassifier
+from app.services.email_matching import MatchResult
+from app.services.email_policy import SuggestionPlan
+from app.services.email_processing import analyze_email, is_classifiable
 
 
 @dataclass(frozen=True)
@@ -111,7 +100,7 @@ def dry_run_classify(
 
         direction = EmailDirection(message.direction)
 
-        if direction == EmailDirection.OUTGOING:
+        if not is_classifiable(message):
             # Before sanitisation and before any request: the cheapest possible
             # place to enforce "we do not classify the user's own writing".
             outcomes.append(
@@ -123,25 +112,13 @@ def dry_run_classify(
             )
             continue
 
-        sanitized = sanitize_email(
-            sender=message.sender,
-            subject=message.subject,
-            body_text=message.body_text,
-        )
+        # The same sanitise -> classify -> match -> decide step the production
+        # pipeline runs (`services.email_processing`), so what this tool measures
+        # is what processing would do. It writes nothing.
+        analysis = analyze_email(db, classifier, message)
+        sanitized = analysis.sanitized
 
-        classifier_input = ClassificationInput(
-            sender=sanitized.sender,
-            subject=sanitized.subject,
-            body_text=sanitized.body_text,
-            received_at=message.received_at,
-            direction=direction,
-        )
-
-        try:
-            classification = classifier.classify(classifier_input)
-        except OutgoingMessageNotClassifiable as exc:
-            # Unreachable via the guard above; kept so a future caller that
-            # skips the pre-check still cannot spend a request.
+        if analysis.error is not None:
             outcomes.append(
                 DryRunOutcome(
                     message_id=message_id,
@@ -149,73 +126,11 @@ def dry_run_classify(
                     sender=sanitized.sender,
                     subject=sanitized.subject,
                     counts=sanitized.counts,
-                    skipped_reason=str(exc),
-                )
-            )
-            continue
-        except JobOpsError as exc:
-            outcomes.append(
-                DryRunOutcome(
-                    message_id=message_id,
-                    direction=direction,
-                    sender=sanitized.sender,
-                    subject=sanitized.subject,
-                    counts=sanitized.counts,
-                    error=str(exc),
+                    error=analysis.error,
                 )
             )
             continue
 
-        # Re-checked here against the sanitised text rather than inferred from
-        # `classify` having succeeded. The classifier already refuses ungrounded
-        # answers, so this is belt and braces — but a validation tool that
-        # reports "grounded: yes" should have looked, not assumed.
-        grounded = not unverifiable_evidence(
-            classification,
-            subject=sanitized.subject,
-            body_text=sanitized.body_text,
-        )
-
-        # Identity, decided separately from meaning and from the same session.
-        # Deterministic and read-only: no provider call, nothing written.
-        match = match_email_to_application(
-            db,
-            MatchInput(
-                company_name=classification.company_name,
-                role_title=classification.role_title,
-            ),
-        )
-
-        # Minimal application state, loaded only when there is one to load.
-        # The policy never receives a CV, a description or a URL.
-        context = None
-        application_status = None
-        if match.application_id is not None:
-            application = db.execute(
-                select(Application).where(Application.id == match.application_id)
-            ).scalar_one_or_none()
-            if application is not None:
-                application_status = application.status
-                context = ApplicationContext(
-                    application_id=application.id,
-                    status=ApplicationStatus(application.status),
-                    has_submitted_cv=application.submitted_cv_document_id is not None,
-                )
-
-        plan = decide(
-            PolicyInput(
-                message_type=classification.message_type,
-                match_status=match.status,
-                match_confidence=match.confidence,
-                application=context,
-                company_name=classification.company_name,
-                role_title=classification.role_title,
-                event_datetime=classification.event_datetime,
-                candidate_application_ids=tuple(match.candidate_ids),
-            )
-        )
-
-        usage = getattr(classifier, "last_usage", None)
         outcomes.append(
             DryRunOutcome(
                 message_id=message_id,
@@ -223,13 +138,13 @@ def dry_run_classify(
                 sender=sanitized.sender,
                 subject=sanitized.subject,
                 counts=sanitized.counts,
-                classification=classification,
-                grounded=grounded,
-                input_tokens=getattr(usage, "input_tokens", None),
-                output_tokens=getattr(usage, "output_tokens", None),
-                match=match,
-                plan=plan,
-                application_status=application_status,
+                classification=analysis.classification,
+                grounded=analysis.grounded,
+                input_tokens=analysis.input_tokens,
+                output_tokens=analysis.output_tokens,
+                match=analysis.match,
+                plan=analysis.plan,
+                application_status=analysis.application_status,
             )
         )
 

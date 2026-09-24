@@ -10,9 +10,10 @@ suggestion (accepted or rejected) can never be processed again.
 `create_suggestion` has no idea where a suggestion came from. Email-derived
 suggestions arrive differently: `persist_email_plan` stores a whole
 `email_policy.SuggestionPlan` — one row per email, with its ordered actions — and
-executes none of it. The accept/reject flow here handles only the original
-single-status-change kind; email plans are refused by it until plan approval
-exists, rather than being half-executed.
+executes none of it. Accepting one runs `approve_email_plan`, which executes
+every action in order inside a single transaction (all or nothing); rejecting
+one is dismissal and executes nothing. Both kinds share the same states and the
+same "resolved is final" rule.
 """
 
 from collections.abc import Sequence
@@ -24,17 +25,20 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.errors import (
     EmailMessageNotFound,
+    EmailPlanNotExecutable,
     InvalidSuggestionPlan,
     OutgoingMessageNotClassifiable,
     SuggestionAlreadyResolved,
-    SuggestionKindNotSupported,
+    SuggestionApprovalInputInvalid,
     SuggestionNotFound,
 )
 from app.enums import (
     MANUAL_EVENT_TYPES,
+    ApplicationChannel,
     ApplicationStatus,
     EmailDirection,
     EventSource,
+    EventType,
     ProposedActionType,
     SuggestionConfidence,
     SuggestionKind,
@@ -44,8 +48,16 @@ from app.enums import (
 )
 from app.models.email_message import EmailMessage
 from app.models.suggestion import Suggestion, SuggestionAction
-from app.services.applications import change_status, get_application, status_change_blocker
-from app.services.email_policy import ProposedAction, SuggestionPlan
+from app.schemas.application import ApplicationCreate
+from app.services.applications import (
+    apply_status_change,
+    change_status,
+    create_application_in_transaction,
+    get_application,
+    status_change_blocker,
+)
+from app.services.email_policy import ProposedAction, SuggestionPlan, status_progression_problem
+from app.services.events import append_event
 
 # application_events.source has no "claude" value yet (Claude integration does
 # not exist). Until it does, a Claude-produced suggestion's acceptance is
@@ -132,29 +144,68 @@ def _require_pending(suggestion: Suggestion) -> None:
         raise SuggestionAlreadyResolved(suggestion.id, suggestion.state)
 
 
-def _require_status_change_kind(suggestion: Suggestion) -> None:
-    """Accept/reject below understand one shape only: a single status change.
+def _lock_suggestion(db: Session, suggestion_id: int) -> Suggestion:
+    """Fetch a suggestion and hold a row lock on it until the transaction ends.
 
-    Checked before the state, so an email plan is refused for what it is rather
-    than for being resolved.
+    Two concurrent approve/dismiss requests for the same suggestion serialise
+    here: the second waits, then sees the first's resolved state and is refused
+    by `_require_pending`, instead of both executing. `populate_existing` makes
+    sure the state checked is the database's, not a stale identity-map copy.
     """
-    if suggestion.kind != SuggestionKind.STATUS_CHANGE.value:
-        raise SuggestionKindNotSupported(suggestion.id, suggestion.kind)
+    suggestion = db.execute(
+        select(Suggestion)
+        .where(Suggestion.id == suggestion_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if suggestion is None:
+        raise SuggestionNotFound(suggestion_id)
+    return suggestion
 
 
-def accept_suggestion(db: Session, suggestion_id: int, *, note: str | None = None) -> Suggestion:
-    """Accept: perform the real status change, then resolve the suggestion.
+def accept_suggestion(
+    db: Session,
+    suggestion_id: int,
+    *,
+    note: str | None = None,
+    role_title: str | None = None,
+    application_channel: ApplicationChannel | None = None,
+) -> Suggestion:
+    """Accept a suggestion of either kind.
+
+    An email plan is executed by `approve_email_plan` (one transaction, all or
+    nothing). `role_title` and `application_channel` apply only to an email
+    plan that creates an application; supplying them anywhere else is refused.
+    """
+    suggestion = get_suggestion(db, suggestion_id)
+    if suggestion.kind == SuggestionKind.EMAIL_PLAN.value:
+        return approve_email_plan(
+            db,
+            suggestion_id,
+            note=note,
+            role_title=role_title,
+            application_channel=application_channel,
+        )
+    if role_title is not None or application_channel is not None:
+        raise SuggestionApprovalInputInvalid(
+            "role_title and application_channel apply only to email suggestions "
+            "that create an application"
+        )
+    return _accept_status_change(db, suggestion, note=note)
+
+
+def _accept_status_change(
+    db: Session, suggestion: Suggestion, *, note: str | None
+) -> Suggestion:
+    """Accept a status-change suggestion: the real status change, then resolve it.
 
     These are two separate commits (`change_status` commits internally, as every
     other caller of it relies on). If the process died between them you would see
     a changed application with a still-pending suggestion — recoverable, since
     re-accepting then fails with a clear "already in that status" rather than
-    silently double-applying anything. Full single-transaction atomicity would
-    require changing `change_status`'s contract for every other caller, which is
-    more than this MVP slice needs.
+    silently double-applying anything. Unchanged since Phase 5: email plans,
+    which can carry several actions, get the single-transaction executor below.
     """
-    suggestion = get_suggestion(db, suggestion_id)
-    _require_status_change_kind(suggestion)
     _require_pending(suggestion)
 
     # Guaranteed non-null for this kind by `ck_suggestions_kind_shape`.
@@ -177,9 +228,13 @@ def accept_suggestion(db: Session, suggestion_id: int, *, note: str | None = Non
 
 
 def reject_suggestion(db: Session, suggestion_id: int) -> Suggestion:
-    """Reject: marks the row only. The application is never touched."""
-    suggestion = get_suggestion(db, suggestion_id)
-    _require_status_change_kind(suggestion)
+    """Reject (dismiss): marks the row only, for either kind. Nothing is executed.
+
+    For an email plan this is dismissal: no application created, no event, no
+    status change. The row lock makes a dismissal racing an approval safe — one
+    of them resolves the suggestion and the other is refused.
+    """
+    suggestion = _lock_suggestion(db, suggestion_id)
     _require_pending(suggestion)
 
     suggestion.state = SuggestionState.REJECTED.value
@@ -187,6 +242,208 @@ def reject_suggestion(db: Session, suggestion_id: int) -> Suggestion:
     db.commit()
     db.refresh(suggestion)
     return suggestion
+
+
+def list_email_plans(
+    db: Session, *, state: SuggestionState | None = None
+) -> Sequence[Suggestion]:
+    """Email-plan suggestions with their actions, newest first."""
+    stmt = (
+        select(Suggestion)
+        .options(selectinload(Suggestion.actions))
+        .where(Suggestion.kind == SuggestionKind.EMAIL_PLAN.value)
+        .order_by(Suggestion.created_at.desc(), Suggestion.id.desc())
+    )
+    if state is not None:
+        stmt = stmt.where(Suggestion.state == state.value)
+    return db.execute(stmt).scalars().all()
+
+
+# --- Email-plan approval ---------------------------------------------------
+
+
+def approve_email_plan(
+    db: Session,
+    suggestion_id: int,
+    *,
+    note: str | None = None,
+    role_title: str | None = None,
+    application_channel: ApplicationChannel | None = None,
+) -> Suggestion:
+    """Execute an email plan's actions in order, in ONE transaction, then accept it.
+
+    All or nothing. Every write goes through a non-committing service core —
+    `create_application_in_transaction`, `append_event`, `apply_status_change` —
+    so the plan's creation, events and status change, and the suggestion's own
+    `accepted` state, are committed together by the single `db.commit()` below.
+    If any action raises, everything is rolled back: no application, no event,
+    no status change survives, and the suggestion stays `pending` and can be
+    retried or dismissed.
+
+    Nothing from planning time is trusted. Each action is re-checked against
+    the application as it is *now*: it must still exist, a status change must
+    still pass `status_change_blocker` (inside `apply_status_change`, so the
+    submitted-CV rule cannot be bypassed) and must still be forward progress
+    per the policy's own rule. No provider or Gmail call is made.
+
+    Optional actions are executed too: approving a plan is the explicit choice
+    to take it. (Today `optional` appears only on recruiter-outreach plans whose
+    single action is the optional creation, so there is nothing to choose
+    between.)
+    """
+    try:
+        suggestion = _lock_suggestion(db, suggestion_id)
+        if suggestion.kind != SuggestionKind.EMAIL_PLAN.value:
+            raise SuggestionApprovalInputInvalid(
+                f"Suggestion {suggestion_id} is not an email plan"
+            )
+        _require_pending(suggestion)
+        if not suggestion.actions:
+            # `accepted` means "what it proposed was done". A review-only or
+            # no-action plan proposes nothing, so accepting it would record an
+            # execution that never happened; it is dismissed instead.
+            raise EmailPlanNotExecutable(
+                suggestion.id,
+                f"a '{suggestion.outcome}' plan has no actions to approve; dismiss it instead",
+            )
+        _execute_plan(
+            db,
+            suggestion,
+            note=note,
+            role_title=role_title,
+            application_channel=application_channel,
+        )
+        suggestion.state = SuggestionState.ACCEPTED.value
+        suggestion.resolved_at = _utcnow()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    db.refresh(suggestion)
+    return suggestion
+
+
+def _execute_plan(
+    db: Session,
+    suggestion: Suggestion,
+    *,
+    note: str | None,
+    role_title: str | None,
+    application_channel: ApplicationChannel | None,
+) -> None:
+    """Apply each action in `position` order. Never commits."""
+    actions = sorted(suggestion.actions, key=lambda action: action.position)
+    creates = [a for a in actions if a.action_type == ProposedActionType.CREATE_APPLICATION]
+    if (role_title is not None or application_channel is not None) and not creates:
+        raise SuggestionApprovalInputInvalid(
+            "role_title and application_channel apply only to a plan that creates "
+            "an application; this one does not"
+        )
+
+    email = suggestion.email_message
+    assert email is not None  # guaranteed for email plans by ck_suggestions_kind_shape
+    new_application_id: int | None = None
+
+    for action in actions:
+        action_type = ProposedActionType(action.action_type)
+
+        if action_type is ProposedActionType.CREATE_APPLICATION:
+            application = create_application_in_transaction(
+                db,
+                _creation_data(action, role_title, application_channel),
+                source=EventSource(action.event_source),
+            )
+            new_application_id = application.id
+            # The plan is now about this application; recorded so the approved
+            # suggestion points at what it produced.
+            suggestion.application_id = application.id
+            continue
+
+        target_id = _target_of(suggestion, action, new_application_id)
+
+        if action_type is ProposedActionType.RECORD_EVENT:
+            assert action.event_type is not None  # ck_suggestion_actions_shape
+            append_event(
+                db,
+                target_id,
+                event_type=EventType(action.event_type),
+                summary=action.summary,
+                source=EventSource(action.event_source),
+                # When the news arrived. A stated future time (an interview)
+                # goes to `scheduled_for`, the timeline's field for exactly that.
+                occurred_at=email.received_at,
+                scheduled_for=action.occurred_at,
+            )
+        elif action_type is ProposedActionType.CHANGE_STATUS:
+            assert action.to_status is not None  # ck_suggestion_actions_shape
+            to_status = ApplicationStatus(action.to_status)
+            current = get_application(db, target_id)
+            problem = status_progression_problem(ApplicationStatus(current.status), to_status)
+            if problem is not None:
+                raise EmailPlanNotExecutable(suggestion.id, problem)
+            # Dated at approval, not at email time: status is replayed from the
+            # event log ordered by `occurred_at`, so a backdated status event
+            # could sort before a later manual change and make the replayed
+            # status disagree with the cached one.
+            apply_status_change(
+                db,
+                target_id,
+                to_status=to_status,
+                note=note or f"Approved email suggestion: {suggestion.rationale}",
+                source=EventSource(action.event_source),
+            )
+
+
+def _target_of(
+    suggestion: Suggestion, action: SuggestionAction, new_application_id: int | None
+) -> int:
+    if action.targets_new_application:
+        if new_application_id is None:
+            raise EmailPlanNotExecutable(
+                suggestion.id,
+                f"action {action.position} targets an application no earlier action creates",
+            )
+        return new_application_id
+    if action.application_id is None:
+        raise EmailPlanNotExecutable(
+            suggestion.id, f"action {action.position} has no target application"
+        )
+    return action.application_id
+
+
+def _creation_data(
+    action: SuggestionAction,
+    role_title: str | None,
+    application_channel: ApplicationChannel | None,
+) -> ApplicationCreate:
+    """What to create: the email's prefill, completed only by what the user supplied.
+
+    Status is left at the default `saved` and no CV is attached: an email proves
+    an application exists, never which CV was sent. User-supplied values win
+    over the prefill — they are the user's own correction, not an inference.
+    """
+    role = role_title if role_title is not None else action.role_title
+    channel = application_channel
+    if channel is None and action.application_channel is not None:
+        channel = ApplicationChannel(action.application_channel)
+    missing = [
+        name
+        for name, value in (("role_title", role), ("application_channel", channel))
+        if not value
+    ]
+    if missing:
+        raise SuggestionApprovalInputInvalid(
+            "The email did not state " + " or ".join(missing) + " for the application "
+            "this plan creates; supply it when approving"
+        )
+    assert action.company_name is not None  # ck_suggestion_actions_shape
+    assert role is not None and channel is not None
+    return ApplicationCreate(
+        company_name=action.company_name,
+        role_title=role,
+        application_channel=channel,
+    )
 
 
 # --- Email-derived plans ---------------------------------------------------
