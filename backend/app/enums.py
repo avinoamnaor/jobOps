@@ -184,6 +184,23 @@ class SuggestionState(StrEnum):
     REJECTED = "rejected"
 
 
+class SuggestionKind(StrEnum):
+    """Which shape a suggestion row has.
+
+    `STATUS_CHANGE` is the original Phase 5 suggestion: one proposed status for
+    one existing application. Every row that existed before email plans did is
+    this kind, and it is the only kind the existing review endpoints handle.
+
+    `EMAIL_PLAN` is the persisted form of an `email_policy.SuggestionPlan`: one
+    row per email, carrying the plan's outcome, with its ordered actions in
+    `suggestion_actions`. It may have no application (a review-only plan, or one
+    proposing to create one) and no status at all (an event-only plan).
+    """
+
+    STATUS_CHANGE = "status_change"
+    EMAIL_PLAN = "email_plan"
+
+
 class EmailDirection(StrEnum):
     """Who authored a stored Gmail message: the account owner, or someone else.
 

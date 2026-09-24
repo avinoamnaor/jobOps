@@ -282,3 +282,36 @@ class SuggestionAlreadyResolved(JobOpsError):
         )
         self.suggestion_id = suggestion_id
         self.state = state
+
+
+class SuggestionKindNotSupported(JobOpsError):
+    """Accept/reject was attempted on a suggestion kind that flow cannot handle.
+
+    The original review flow understands exactly one shape — a single status
+    change for an existing application. Email-derived plans can carry several
+    ordered actions, or propose creating an application, so accepting one
+    through that flow would silently do the wrong thing. Refused instead until
+    plan approval exists.
+    """
+
+    def __init__(self, suggestion_id: int, kind: str) -> None:
+        super().__init__(
+            f"Suggestion {suggestion_id} is a '{kind}' suggestion, which cannot be "
+            "accepted or rejected through this flow yet"
+        )
+        self.suggestion_id = suggestion_id
+        self.kind = kind
+
+
+class InvalidSuggestionPlan(JobOpsError):
+    """A suggestion plan could not be persisted because it is not executable.
+
+    Raised when persistence finds a plan that, if approved, would break a rule —
+    for example a status change the status service would refuse, or an action
+    targeting "the new application" with no creation before it. Such a plan is
+    a caller bug or a stale snapshot; it is never stored.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"Suggestion plan cannot be persisted: {detail}")
+        self.detail = detail

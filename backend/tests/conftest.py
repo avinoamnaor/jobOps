@@ -37,8 +37,9 @@ from app.main import app
 BACKEND_ROOT = PROJECT_ROOT / "backend"
 
 # Order matters: children before parents, so foreign keys never block us.
-# (`suggestions` is not listed: it has no children, and TRUNCATE ... CASCADE on
-# `applications` already takes it with it via the FK. `email_messages` has no FK
+# (`suggestions` and `suggestion_actions` are not listed: TRUNCATE ... CASCADE on
+# `applications` and `email_messages` takes them via their FKs — every suggestion
+# references at least one of the two. `email_messages` has no FK
 # to anything — nothing else truncates it — so it must be listed explicitly.)
 _TABLES_IN_DELETION_ORDER = (
     "application_events",

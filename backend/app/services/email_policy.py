@@ -577,9 +577,12 @@ def _reason_for(message_type: EmailMessageType, actions: list[ProposedAction]) -
 
 
 def idempotency_key(email_message_id: int, action: ProposedAction) -> str:
-    """The stable identity a later persistence layer should deduplicate on.
+    """A stable identity for one proposed action.
 
-    Recommendation, not yet enforced — nothing is persisted in this slice.
+    Persistence (`services.suggestions.persist_email_plan`) deduplicates one
+    level up — at most one plan per email, enforced by a UNIQUE constraint — so
+    this key is not stored. It remains the per-action identity should actions
+    ever need deduplicating on their own.
 
     Built from the internal `EmailMessage.id` rather than the Gmail message id:
     the internal id is already the stable handle everything else uses, and

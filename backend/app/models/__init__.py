@@ -10,6 +10,13 @@ from app.models.application import Application
 from app.models.application_event import ApplicationEvent
 from app.models.document import Document
 from app.models.email_message import EmailMessage
-from app.models.suggestion import Suggestion
+from app.models.suggestion import Suggestion, SuggestionAction
 
-__all__ = ["Application", "ApplicationEvent", "Document", "EmailMessage", "Suggestion"]
+__all__ = [
+    "Application",
+    "ApplicationEvent",
+    "Document",
+    "EmailMessage",
+    "Suggestion",
+    "SuggestionAction",
+]

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.enums import SuggestionState
+from app.enums import SuggestionKind, SuggestionState
 from app.models.suggestion import Suggestion
 from app.schemas.suggestion import (
     SuggestionAcceptRequest,
@@ -60,7 +60,12 @@ def list_suggestions(
     `?state=pending` serves both the nav badge count and the review page —
     omitting the filter returns every suggestion, for a future history view.
     """
-    suggestions = suggestion_service.list_suggestions(db, state=state)
+    # Status-change suggestions only: this response shape (and the review UI
+    # built on it) assumes one application and one proposed status per row,
+    # which email-derived plans do not have.
+    suggestions = suggestion_service.list_suggestions(
+        db, state=state, kind=SuggestionKind.STATUS_CHANGE
+    )
     return [_with_application(item) for item in suggestions]
 
 

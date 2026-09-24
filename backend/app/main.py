@@ -24,10 +24,12 @@ from app.core.errors import (
     FolderOpenFailed,
     GmailNotConnected,
     GmailSyncFailed,
+    InvalidSuggestionPlan,
     StatusUnchanged,
     SubmittedCvRequired,
     SubmittedCvUnchanged,
     SuggestionAlreadyResolved,
+    SuggestionKindNotSupported,
     SuggestionNotFound,
     UnsafeDocumentPath,
 )
@@ -142,6 +144,19 @@ def handle_suggestion_already_resolved(_: Request, exc: SuggestionAlreadyResolve
     # 409: the request was well-formed, but conflicts with the suggestion's
     # current (already-resolved) state.
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(SuggestionKindNotSupported)
+def handle_suggestion_kind_not_supported(
+    _: Request, exc: SuggestionKindNotSupported
+) -> JSONResponse:
+    # 409: the suggestion exists, but its kind conflicts with this operation.
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(InvalidSuggestionPlan)
+def handle_invalid_suggestion_plan(_: Request, exc: InvalidSuggestionPlan) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
 @app.exception_handler(GmailNotConnected)
