@@ -557,3 +557,110 @@ class TestMatchingIsIncludedInTheDryRun:
         # The answer to "why did JobOps think this?" is printed, not implied.
         assert "why" in printed
         assert "signals" in printed
+
+
+class TestPolicyIsIncludedInTheDryRun:
+    """The plan is computed alongside identity, and executed nowhere."""
+
+    def _with_application(self, db: Session, status: str = "saved"):
+        from app.enums import ApplicationStatus
+        from app.schemas.application import ApplicationCreate
+        from app.services.applications import create_application
+
+        return create_application(
+            db,
+            ApplicationCreate(
+                company_name="Brightpath Systems",
+                role_title="Backend Engineer",
+                status=ApplicationStatus(status),
+            ),
+        )
+
+    def test_a_plan_is_attached_for_a_matched_email(self, db_session: Session) -> None:
+        from app.enums import ProposedActionType, SuggestionPlanOutcome
+
+        application = self._with_application(db_session)
+        message = _store(db_session)
+
+        outcome = dry_run_classify(db_session, FakeClassifier(), [message.id])[0]
+
+        assert outcome.plan is not None
+        # FakeClassifier returns a rejection; the application is saved.
+        assert outcome.plan.outcome is SuggestionPlanOutcome.PROPOSE_ACTIONS
+        assert outcome.plan.application_id == application.id
+        assert ProposedActionType.CHANGE_STATUS in {
+            action.action_type for action in outcome.plan.actions
+        }
+        assert outcome.application_status == "saved"
+
+    def test_no_match_yields_a_review_plan_not_a_mutation(
+        self, db_session: Session
+    ) -> None:
+        from app.enums import SuggestionPlanOutcome
+
+        message = _store(db_session)
+
+        outcome = dry_run_classify(db_session, FakeClassifier(), [message.id])[0]
+
+        assert outcome.plan is not None
+        assert outcome.plan.outcome is SuggestionPlanOutcome.REVIEW_REQUIRED
+        assert outcome.plan.actions == ()
+        assert outcome.plan.application_id is None
+
+    def test_an_outgoing_message_gets_no_plan(self, db_session: Session) -> None:
+        message = _store(db_session, direction="outgoing")
+
+        outcome = dry_run_classify(db_session, FakeClassifier(), [message.id])[0]
+
+        assert outcome.skipped
+        assert outcome.plan is None
+
+    def test_a_classification_error_leaves_the_plan_unattempted(
+        self, db_session: Session
+    ) -> None:
+        message = _store(db_session)
+        fake = FakeClassifier(raises=EmailClassificationFailed("timeout"))
+
+        outcome = dry_run_classify(db_session, fake, [message.id])[0]
+
+        assert outcome.error is not None
+        assert outcome.plan is None
+
+    def test_the_dry_run_executes_nothing_it_proposes(self, db_session: Session) -> None:
+        """The whole point of the slice: proposals, never actions."""
+        application = self._with_application(db_session)
+        before = (application.status, application.updated_at)
+        events_before = len(
+            db_session.execute(select(ApplicationEvent)).scalars().all()
+        )
+        message = _store(db_session)
+
+        outcome = dry_run_classify(db_session, FakeClassifier(), [message.id])[0]
+
+        # A status change was proposed...
+        assert outcome.plan is not None
+        assert outcome.plan.actions
+        # ...and nothing happened.
+        db_session.refresh(application)
+        assert (application.status, application.updated_at) == before
+        assert (
+            len(db_session.execute(select(ApplicationEvent)).scalars().all())
+            == events_before
+        )
+        assert db_session.execute(select(Suggestion)).scalars().all() == []
+
+    def test_the_cli_prints_the_plan_and_its_rationale(
+        self, db_session: Session, capsys
+    ) -> None:
+        self._with_application(db_session)
+        message = _store(db_session)
+        outcome = dry_run_classify(db_session, FakeClassifier(), [message.id])[0]
+
+        _load_cli().print_outcome(outcome)
+
+        printed = capsys.readouterr().out
+        assert "PLAN" in printed
+        assert "action" in printed
+        assert "rationale" in printed
+        # Still no body, even with a plan attached.
+        assert "Questions? Write to" not in printed

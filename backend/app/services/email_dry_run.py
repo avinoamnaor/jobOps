@@ -30,7 +30,8 @@ from sqlalchemy.orm import Session
 from app.core.classification_evidence import unverifiable_evidence
 from app.core.email_sanitizer import SanitizationCounts, sanitize_email
 from app.core.errors import JobOpsError, OutgoingMessageNotClassifiable
-from app.enums import EmailDirection
+from app.enums import ApplicationStatus, EmailDirection
+from app.models.application import Application
 from app.models.email_message import EmailMessage
 from app.schemas.classification import EmailClassification
 from app.services.email_classifier import ClassificationInput, EmailClassifier
@@ -38,6 +39,12 @@ from app.services.email_matching import (
     MatchInput,
     MatchResult,
     match_email_to_application,
+)
+from app.services.email_policy import (
+    ApplicationContext,
+    PolicyInput,
+    SuggestionPlan,
+    decide,
 )
 
 
@@ -63,6 +70,12 @@ class DryRunOutcome:
     # classification's company and role. Present only when classification
     # succeeded — there is nothing to match on otherwise.
     match: MatchResult | None = None
+    # What JobOps would propose. A plan, never an action — nothing in this
+    # module executes any part of it.
+    plan: SuggestionPlan | None = None
+    # The matched application's current status, carried so the dry run can show
+    # why a status change was or was not proposed.
+    application_status: str | None = None
 
     @property
     def skipped(self) -> bool:
@@ -173,6 +186,35 @@ def dry_run_classify(
             ),
         )
 
+        # Minimal application state, loaded only when there is one to load.
+        # The policy never receives a CV, a description or a URL.
+        context = None
+        application_status = None
+        if match.application_id is not None:
+            application = db.execute(
+                select(Application).where(Application.id == match.application_id)
+            ).scalar_one_or_none()
+            if application is not None:
+                application_status = application.status
+                context = ApplicationContext(
+                    application_id=application.id,
+                    status=ApplicationStatus(application.status),
+                    has_submitted_cv=application.submitted_cv_document_id is not None,
+                )
+
+        plan = decide(
+            PolicyInput(
+                message_type=classification.message_type,
+                match_status=match.status,
+                match_confidence=match.confidence,
+                application=context,
+                company_name=classification.company_name,
+                role_title=classification.role_title,
+                event_datetime=classification.event_datetime,
+                candidate_application_ids=tuple(match.candidate_ids),
+            )
+        )
+
         usage = getattr(classifier, "last_usage", None)
         outcomes.append(
             DryRunOutcome(
@@ -186,6 +228,8 @@ def dry_run_classify(
                 input_tokens=getattr(usage, "input_tokens", None),
                 output_tokens=getattr(usage, "output_tokens", None),
                 match=match,
+                plan=plan,
+                application_status=application_status,
             )
         )
 

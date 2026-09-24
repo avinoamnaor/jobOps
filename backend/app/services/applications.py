@@ -17,6 +17,7 @@ both land, or neither does.
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from enum import StrEnum
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -258,6 +259,44 @@ def create_application(db: Session, data: ApplicationCreate) -> Application:
     return application
 
 
+class StatusChangeBlocker(StrEnum):
+    """Why a status change would be refused.
+
+    There is no transition table in this project, and deliberately so — real
+    hiring processes skip stages, go backwards and reopen. These two guards are
+    therefore the *entire* lifecycle rule set, which makes them worth naming:
+    anything wanting to know "would this change succeed?" without attempting it
+    must consult exactly this, not a second copy that drifts.
+    """
+
+    # The application is already in the requested status.
+    UNCHANGED = "unchanged"
+    # A submitted-state status cannot be recorded without knowing which CV was
+    # sent. `saved` and the terminal/hold statuses are exempt.
+    SUBMITTED_CV_REQUIRED = "submitted_cv_required"
+
+
+def status_change_blocker(
+    *,
+    current_status: str,
+    to_status: ApplicationStatus,
+    has_submitted_cv: bool,
+) -> StatusChangeBlocker | None:
+    """Would this status change be refused, and why? None means it would succeed.
+
+    Pure: no session, no row, no I/O. `change_status` below calls it rather than
+    repeating the checks, so a caller that asks this question in advance gets
+    exactly the answer the real attempt would give. That matters for the email
+    policy layer, which must never propose an action that would raise when
+    executed.
+    """
+    if current_status == to_status.value:
+        return StatusChangeBlocker.UNCHANGED
+    if to_status in STATUSES_REQUIRING_SUBMITTED_CV and not has_submitted_cv:
+        return StatusChangeBlocker.SUBMITTED_CV_REQUIRED
+    return None
+
+
 def change_status(
     db: Session,
     application_id: int,
@@ -276,15 +315,14 @@ def change_status(
     """
     application = get_application(db, application_id)
 
-    if application.status == to_status.value:
+    blocker = status_change_blocker(
+        current_status=application.status,
+        to_status=to_status,
+        has_submitted_cv=application.submitted_cv_document_id is not None,
+    )
+    if blocker is StatusChangeBlocker.UNCHANGED:
         raise StatusUnchanged(application.status)
-
-    # A submitted-state status may not be recorded without knowing which CV was
-    # sent. `saved` and the terminal/hold statuses are exempt.
-    if (
-        to_status in STATUSES_REQUIRING_SUBMITTED_CV
-        and application.submitted_cv_document_id is None
-    ):
+    if blocker is StatusChangeBlocker.SUBMITTED_CV_REQUIRED:
         raise SubmittedCvRequired(to_status.value)
 
     previous_status = application.status

@@ -124,11 +124,31 @@ def print_outcome(outcome: DryRunOutcome) -> None:
         if match.confidence is not None:
             print(f"  ({match.confidence.value} confidence)", end="")
         print()
+        if outcome.application_status:
+            print(f"      app status  {outcome.application_status}")
         if match.candidate_ids:
             listed = ", ".join(f"#{candidate}" for candidate in match.candidate_ids)
             print(f"      candidates  {listed}")
         print(f"      signals     {match.signals.describe()}")
         print(f"      why         {match.reason}")
+
+    plan = outcome.plan
+    if plan is not None:
+        print(f"      PLAN        {plan.outcome.value}")
+        for action in plan.actions:
+            detail = ""
+            if action.to_status is not None:
+                detail = f" [{action.to_status.value}]"
+            elif action.event_type is not None:
+                detail = f" [{action.event_type.value}]"
+            elif action.company_name:
+                detail = f" [{action.company_name} / {action.role_title or 'role unknown'}]"
+            print(f"        action    {action.action_type.value}: {action.summary}{detail}")
+        if not plan.actions:
+            print("        action    (none proposed)")
+        for note in plan.field_notes:
+            print(f"        note      {note}")
+        print(f"        rationale {plan.reason}")
     print()
 
 
@@ -160,6 +180,16 @@ def print_summary(outcomes: list[DryRunOutcome]) -> None:
             by_status[match.status.value] = by_status.get(match.status.value, 0) + 1
         rendered = " ".join(f"{status}={count}" for status, count in sorted(by_status.items()))
         print(f"  matching         {rendered}")
+
+    plans = [o.plan for o in classified if o.plan is not None]
+    if plans:
+        by_outcome: dict[str, int] = {}
+        for plan in plans:
+            by_outcome[plan.outcome.value] = by_outcome.get(plan.outcome.value, 0) + 1
+        rendered = " ".join(f"{name}={count}" for name, count in sorted(by_outcome.items()))
+        print(f"  policy           {rendered}")
+        proposed = sum(len(plan.actions) for plan in plans)
+        print(f"  actions proposed {proposed} (none executed)")
 
     totals = [o.counts for o in found if o.counts is not None]
     if totals:

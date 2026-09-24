@@ -449,6 +449,52 @@ class RoleSignal(StrEnum):
     MISSING = "missing"
 
 
+class SuggestionPlanOutcome(StrEnum):
+    """What kind of response an email warrants, before anything is executed.
+
+    A plan is a *proposal*. Nothing in this vocabulary implies that JobOps has
+    acted, only what it would put in front of the user.
+    """
+
+    # Concrete proposals the user can accept: record an event, change a status,
+    # create an application.
+    PROPOSE_ACTIONS = "propose_actions"
+    # Worth showing, but nothing to accept — the email carries news rather than
+    # a change to make.
+    INFORMATIONAL = "informational"
+    # Meaningful, but the target is not established. Never carries a mutation.
+    REVIEW_REQUIRED = "review_required"
+    # Not worth the user's attention at all.
+    NO_ACTION = "no_action"
+
+
+class ProposedActionType(StrEnum):
+    """The kinds of thing a plan may propose."""
+
+    # Append a timeline event to an existing application.
+    RECORD_EVENT = "record_event"
+    # Move an existing application to a different status.
+    CHANGE_STATUS = "change_status"
+    # Create a new application, prefilled from the email.
+    CREATE_APPLICATION = "create_application"
+
+
+# Message types that never warrant an action, however confidently matched.
+#
+# Each is a deliberate v1 decision rather than an oversight: a job alert is not
+# evidence of an application; a data-retention notice is administrative noise;
+# a post-interview survey implies an interview happened but inferring
+# retrospective history from it was explicitly deferred.
+NO_ACTION_MESSAGE_TYPES: frozenset[EmailMessageType] = frozenset(
+    {
+        EmailMessageType.IRRELEVANT,
+        EmailMessageType.JOB_ALERT,
+        EmailMessageType.PRIVACY_OR_RETENTION_NOTICE,
+        EmailMessageType.POST_INTERVIEW_SURVEY,
+    }
+)
+
+
 def sql_value_list(enum_cls: type[StrEnum]) -> str:
     """Render an enum as a SQL literal list, for CHECK constraints."""
     return ", ".join(f"'{member.value}'" for member in enum_cls)
